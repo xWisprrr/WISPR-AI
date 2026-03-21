@@ -22,7 +22,8 @@ class TestRootEndpoint:
         assert resp.status_code == 200
 
     def test_root_contains_app_name(self, client):
-        data = resp = client.get("/").json()
+        resp = client.get("/")
+        data = resp.json()
         assert "WISPR" in data["name"]
 
     def test_root_has_capabilities(self, client):
