@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
@@ -132,14 +133,10 @@ class LLMRouter:
     @staticmethod
     def _configure_keys() -> None:
         if settings.openai_api_key:
-            import os
             os.environ.setdefault("OPENAI_API_KEY", settings.openai_api_key)
         if settings.anthropic_api_key:
-            import os
             os.environ.setdefault("ANTHROPIC_API_KEY", settings.anthropic_api_key)
         if settings.gemini_api_key:
-            import os
             os.environ.setdefault("GEMINI_API_KEY", settings.gemini_api_key)
         if settings.groq_api_key:
-            import os
             os.environ.setdefault("GROQ_API_KEY", settings.groq_api_key)

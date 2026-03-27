@@ -73,6 +73,9 @@ class Settings(BaseSettings):
     # ── Plugins ───────────────────────────────────────────────────────────
     plugins_dir: str = "plugins"
 
+    # ── CORS ──────────────────────────────────────────────────────────────
+    cors_origins: List[str] = ["*"]
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
