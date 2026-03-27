@@ -33,7 +33,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # ── Startup ───────────────────────────────────────────────────────────
     plugins: PluginManager = app.state.plugins
     logger.info("🚀 %s v%s starting up…", settings.app_name, settings.app_version)
-    logger.info("   Agents: CoreAgent, CoderAgent, SearchAgent, StudioAgent, OrchestratorAgent")
+    logger.info("   Agents: CoreAgent, CoderAgent, SearchAgent, StudioAgent, ReActAgent, OrchestratorAgent")
     logger.info("   Plugins loaded: %d", len(plugins.list_plugins()))
 
     yield  # application is running
