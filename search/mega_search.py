@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import xml.etree.ElementTree as ET
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote_plus
 
 import httpx
+from bs4 import BeautifulSoup
 
 from config import get_settings
 
@@ -61,8 +63,6 @@ async def _ddg_html(query: str, client: httpx.AsyncClient, max_results: int) -> 
             headers=headers,
             timeout=_TIMEOUT,
         )
-        from bs4 import BeautifulSoup
-
         soup = BeautifulSoup(r.text, "lxml")
         results = []
         for result in soup.select(".result__body")[:max_results]:
@@ -122,8 +122,6 @@ async def _arxiv(query: str, client: httpx.AsyncClient, max_results: int) -> Lis
             },
             timeout=_TIMEOUT,
         )
-        import xml.etree.ElementTree as ET
-
         root = ET.fromstring(r.text)
         ns = {"atom": "http://www.w3.org/2005/Atom"}
         results = []

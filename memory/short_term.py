@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Deque, Dict, List, Optional
 
 from config import get_settings
@@ -16,7 +16,7 @@ settings = get_settings()
 class MemoryEntry:
     role: str  # "user" | "assistant" | "system"
     content: str
-    timestamp: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     metadata: Dict = field(default_factory=dict)
 
 

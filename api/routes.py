@@ -96,6 +96,12 @@ class PluginInvokeRequest(BaseModel):
     context: Optional[Dict[str, Any]] = None
 
 
+class DeployRequest(BaseModel):
+    project_path: str
+    target: str = Field(..., description="github | vercel | netlify")
+    config: Optional[Dict[str, Any]] = None
+
+
 # ── Router ────────────────────────────────────────────────────────────────────
 
 def create_router() -> APIRouter:
@@ -385,14 +391,10 @@ def create_router() -> APIRouter:
 
     # ── /studio/deploy ────────────────────────────────────────────────────
     @router.post("/studio/deploy", tags=["studio"])
-    async def studio_deploy(
-        project_path: str,
-        target: str,
-        config: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+    async def studio_deploy(body: DeployRequest) -> Dict[str, Any]:
         """Generate deployment instructions for GitHub, Vercel, or Netlify."""
         ide = StudioIDE()
-        result = await ide.deploy(project_path, target, config)
+        result = await ide.deploy(body.project_path, body.target, body.config)
         if not result.get("success"):
             raise HTTPException(400, result.get("error", "Deploy failed"))
         return result

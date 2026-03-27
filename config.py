@@ -77,6 +77,8 @@ class Settings(BaseSettings):
     react_max_iterations: int = 8
     session_ttl_seconds: int = 3600
     session_max_turns: int = 20
+    # ── CORS ──────────────────────────────────────────────────────────────
+    cors_origins: List[str] = ["*"]
 
 
 @lru_cache(maxsize=1)

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
@@ -33,7 +33,7 @@ class TaskMemory:
             "description": description,
             "steps": [],
             "status": "pending",
-            "created_at": datetime.utcnow().isoformat(),
+            "created_at": datetime.now(timezone.utc).isoformat(),
             "metadata": metadata or {},
         }
         self._save()
@@ -54,7 +54,7 @@ class TaskMemory:
             "action": action,
             "result": result,
             "success": success,
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
         }
         self._tasks[task_id]["steps"].append(step)
         self._save()
@@ -64,7 +64,7 @@ class TaskMemory:
             return
         self._tasks[task_id]["status"] = "completed"
         self._tasks[task_id]["final_result"] = final_result
-        self._tasks[task_id]["completed_at"] = datetime.utcnow().isoformat()
+        self._tasks[task_id]["completed_at"] = datetime.now(timezone.utc).isoformat()
         self._save()
 
     def fail_task(self, task_id: str, error: str) -> None:
@@ -72,7 +72,7 @@ class TaskMemory:
             return
         self._tasks[task_id]["status"] = "failed"
         self._tasks[task_id]["error"] = error
-        self._tasks[task_id]["failed_at"] = datetime.utcnow().isoformat()
+        self._tasks[task_id]["failed_at"] = datetime.now(timezone.utc).isoformat()
         self._save()
 
     def get_task(self, task_id: str) -> Optional[Dict[str, Any]]:

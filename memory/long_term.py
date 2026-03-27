@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from config import get_settings
@@ -30,7 +30,7 @@ class LongTermMemory:
             "key": key,
             "value": value,
             "tags": tags or [],
-            "updated_at": datetime.utcnow().isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
         }
         # Overwrite existing key
         for i, rec in enumerate(self._data):
