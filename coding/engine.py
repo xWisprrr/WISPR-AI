@@ -1,4 +1,8 @@
-"""Multi-Language Coding Engine — detection, generation, debug, and translation."""
+"""Multi-Language Coding Engine — detection, generation, debug, and translation.
+
+This module also acts as the top-level facade for the Code Engine subsystem,
+wiring together agents, sessions, file tools, deployment, and the chat router.
+"""
 
 from __future__ import annotations
 
@@ -186,3 +190,69 @@ class CodingEngine:
         # Match fenced blocks with or without a language identifier, with or without
         # a newline immediately after the opening fence (e.g. ```python\n or ```python ).
         return re.findall(r"```(?:\w+)?\n?(.*?)```", text, flags=re.DOTALL)
+
+
+# ── Code Engine facade ────────────────────────────────────────────────────────
+
+class CodeEngine:
+    """Unified Code Engine facade.
+
+    Combines the low-level CodingEngine (generate/debug/optimise/translate)
+    with the full agentic stack:
+      • 5 specialist agent modes (Ask / Architect / Code / Debug / Orchestrator)
+      • Persistent sessions
+      • Real-time filesystem tools with audit log
+      • Deployment integrations (GitHub / Vercel / Netlify / Railway / Docker)
+      • Unlimited prompting — no rate limits
+    """
+
+    def __init__(self, llm_router: Optional[LLMRouter] = None) -> None:
+        from coding.chat.router import ChatRouter
+        from coding.session.manager import CodeSessionManager
+        from coding.tools.audit_log import AuditLog
+        from coding.deployment import DeploymentEngine
+
+        self.llm = llm_router or LLMRouter()
+        self._low_level = CodingEngine(llm_router=self.llm)
+        self.sessions = CodeSessionManager()
+        self.audit = AuditLog()
+        self.chat_router = ChatRouter(
+            llm_router=self.llm,
+            session_manager=self.sessions,
+            audit=self.audit,
+        )
+        self.deployment = DeploymentEngine(llm_router=self.llm)
+
+    # ── chat (agentic) ────────────────────────────────────────────────────
+
+    async def chat(self, message: str, **kwargs) -> Dict[str, Any]:
+        """Route *message* to the correct agent mode and return the response."""
+        return await self.chat_router.chat(message, **kwargs)
+
+    async def stream_chat(self, message: str, **kwargs):
+        """Async generator — yields response tokens for real-time streaming."""
+        async for chunk in self.chat_router.stream_chat(message, **kwargs):
+            yield chunk
+
+    # ── low-level code ops (unchanged API) ───────────────────────────────
+
+    def detect_language(self, code: str) -> str:
+        return self._low_level.detect_language(code)
+
+    async def generate(self, description: str, language: str = "python", context: Optional[str] = None) -> Dict[str, Any]:
+        return await self._low_level.generate(description, language=language, context=context)
+
+    async def debug(self, code: str, error: str, language: Optional[str] = None) -> Dict[str, Any]:
+        return await self._low_level.debug(code, error, language=language)
+
+    async def optimise(self, code: str, language: Optional[str] = None) -> Dict[str, Any]:
+        return await self._low_level.optimise(code, language=language)
+
+    async def translate(self, code: str, target_language: str, source_language: Optional[str] = None) -> Dict[str, Any]:
+        return await self._low_level.translate(code, target_language, source_language=source_language)
+
+    # ── deployment ────────────────────────────────────────────────────────
+
+    async def deploy(self, provider: str, project_path: str, **kwargs) -> Dict[str, Any]:
+        result = await self.deployment.deploy(provider, project_path=project_path, **kwargs)
+        return result.to_dict()

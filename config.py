@@ -77,6 +77,20 @@ class Settings(BaseSettings):
     react_max_iterations: int = 8
     session_ttl_seconds: int = 3600
     session_max_turns: int = 20
+    # ── Code Engine ───────────────────────────────────────────────────────
+    # Session persistence
+    code_engine_sessions_path: str = "coding/store/sessions.jsonl"
+    # Audit log
+    code_engine_audit_path: str = "coding/store/audit.jsonl"
+    # Max auto-test retry rounds for automatic failure recovery
+    code_engine_max_retries: int = 3
+    # Deployment: supported providers
+    code_engine_deploy_providers: List[str] = [
+        "github", "vercel", "netlify", "railway", "docker"
+    ]
+    # Unrestricted filesystem access — set to True to enable deny-list warnings in logs
+    code_engine_fs_warn_unrestricted: bool = True
+
     # ── CORS ──────────────────────────────────────────────────────────────
     cors_origins: List[str] = ["*"]
 
