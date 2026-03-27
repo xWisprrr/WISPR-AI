@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Dict, List, Optional
 
 from llm.router import LLMRouter, TaskType
@@ -126,7 +127,6 @@ class ReasoningEngine:
             if not line:
                 continue
             # Accept lines like "1. Do something" or "1) Do something"
-            import re
             match = re.match(r"^(\d+)[.)]\s+(.*)", line)
             if match:
                 num = int(match.group(1))
@@ -180,7 +180,7 @@ class ReasoningEngine:
                 try:
                     confidence = float(line.split(":", 1)[1].strip())
                 except ValueError:
-                    pass
+                    logger.debug("Could not parse CONFIDENCE value from reflection response")
             elif line.startswith("ISSUES:"):
                 issues_text = line.split(":", 1)[1].strip()
                 if issues_text.lower() != "none":
