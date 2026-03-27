@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 from agents.base_agent import AgentResult, BaseAgent
 from agents.core_agent import CoreAgent
 from agents.coder_agent import CoderAgent
+from agents.react_agent import ReActAgent
 from agents.search_agent import SearchAgent
 from agents.studio_agent import StudioAgent
 from llm.router import LLMRouter, TaskType
@@ -27,6 +28,8 @@ Available agents:
 - CoderAgent : writing, debugging, optimising code
 - SearchAgent: real-time web search and research
 - StudioAgent: building and deploying full applications
+- ReActAgent : autonomous iterative Reason-Act-Observe loops for complex,
+               multi-step tasks that require tool use (search + code execution)
 
 Given the user task, output a JSON array of sub-tasks. Each element must have:
   {
@@ -70,6 +73,7 @@ class OrchestratorAgent:
             "CoderAgent": CoderAgent(self.llm, self.memory),
             "SearchAgent": SearchAgent(llm_router=self.llm, memory=self.memory),
             "StudioAgent": StudioAgent(llm_router=self.llm, memory=self.memory),
+            "ReActAgent": ReActAgent(llm_router=self.llm, memory=self.memory),
         }
 
     async def run(

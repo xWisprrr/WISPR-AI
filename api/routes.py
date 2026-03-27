@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import json
 import logging
-from typing import Any, Dict, List, Optional
+import time
+from typing import Any, AsyncIterator, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from agents.orchestrator import OrchestratorAgent
+from agents.react_agent import ReActAgent
 from coding.engine import CodingEngine, SUPPORTED_LANGUAGES
 from hallucination.reducer import HallucinationReducer
 from memory.manager import MemoryManager
@@ -17,6 +21,7 @@ from reasoning.engine import ReasoningEngine
 from search.mega_search import MegaSearch
 from studio.ide import StudioIDE
 from config import get_settings
+from llm.router import TaskType
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -42,6 +47,11 @@ class QueryRequest(BaseModel):
     query: str = Field(..., description="The user's question or task")
     context: Optional[Dict[str, Any]] = Field(default=None)
     use_reasoning: bool = Field(default=False)
+    use_react: bool = Field(default=False, description="Run the ReAct iterative agent")
+    session_id: Optional[str] = Field(
+        default=None,
+        description="Session ID for multi-turn conversation threading.",
+    )
 
 
 class QueryResponse(BaseModel):
@@ -50,6 +60,8 @@ class QueryResponse(BaseModel):
     plan: Optional[List[Dict]] = None
     agent_results: Optional[List[Dict]] = None
     confidence: Optional[float] = None
+    session_id: Optional[str] = None
+    usage: Optional[Dict[str, int]] = None
 
 
 class SearchRequest(BaseModel):
@@ -104,10 +116,66 @@ def create_router() -> APIRouter:
             "status": "online",
             "system": settings.app_name,
             "version": settings.app_version,
-            "agents": ["CoreAgent", "CoderAgent", "SearchAgent", "StudioAgent", "OrchestratorAgent"],
+            "agents": ["CoreAgent", "CoderAgent", "SearchAgent", "StudioAgent", "ReActAgent", "OrchestratorAgent"],
             "plugins": [p["name"] for p in plugins.list_plugins()],
             "supported_languages": SUPPORTED_LANGUAGES,
         }
+
+    # ── /health ───────────────────────────────────────────────────────────
+    @router.get("/health", tags=["system"])
+    async def health_check(request: Request) -> Dict[str, Any]:
+        """Detailed health check — reports the status of every subsystem."""
+        memory: MemoryManager = request.app.state.memory
+        plugins: PluginManager = request.app.state.plugins
+        orchestrator: OrchestratorAgent = request.app.state.orchestrator
+
+        checks: Dict[str, Any] = {}
+
+        # Memory subsystems
+        try:
+            _ = memory.short_term.as_messages()
+            _ = memory.long_term.all_entries()
+            _ = memory.tasks.recent_tasks(n=1)
+            checks["memory"] = {"status": "ok", "sessions": memory.sessions.active_count()}
+        except Exception as exc:
+            checks["memory"] = {"status": "error", "detail": str(exc)}
+
+        # Plugin system
+        try:
+            plugin_list = plugins.list_plugins()
+            checks["plugins"] = {"status": "ok", "loaded": len(plugin_list)}
+        except Exception as exc:
+            checks["plugins"] = {"status": "error", "detail": str(exc)}
+
+        # LLM router (key configuration only — no real LLM call)
+        llm_keys = {
+            "openai": bool(settings.openai_api_key),
+            "anthropic": bool(settings.anthropic_api_key),
+            "gemini": bool(settings.gemini_api_key),
+            "groq": bool(settings.groq_api_key),
+        }
+        checks["llm"] = {
+            "status": "ok",
+            "configured_providers": [k for k, v in llm_keys.items() if v],
+            "routing": {
+                "reasoning": settings.reasoning_model,
+                "coding": settings.coding_model,
+                "search": settings.search_model,
+                "general": settings.general_model,
+                "react": settings.reasoning_model,
+                "fallback": settings.fallback_model,
+            },
+            "token_usage": orchestrator.llm.get_total_usage(),
+        }
+
+        # Agents
+        checks["agents"] = {
+            "status": "ok",
+            "available": list(orchestrator._agents.keys()),
+        }
+
+        overall = "ok" if all(v.get("status") == "ok" for v in checks.values()) else "degraded"
+        return {"status": overall, "timestamp": time.time(), "checks": checks}
 
     # ── /query ────────────────────────────────────────────────────────────
     @router.post("/query", response_model=QueryResponse, tags=["query"])
@@ -117,20 +185,121 @@ def create_router() -> APIRouter:
         memory: MemoryManager = Depends(_get_memory),
     ) -> QueryResponse:
         """Main AI interface — routes the task to the best agent(s)."""
-        if body.use_reasoning:
-            engine = ReasoningEngine(llm_router=orchestrator.llm, memory=memory)
-            result = await engine.reason(body.query, context=body.context)
+        # ── Session history injection ──────────────────────────────────────
+        ctx = dict(body.context or {})
+        session_history: List[Dict[str, str]] = []
+        if body.session_id:
+            session = memory.sessions.get_or_create(body.session_id)
+            session_history = session.as_messages()
+            if session_history:
+                ctx.setdefault("session_history", session_history)
+
+        # ── ReAct agent ───────────────────────────────────────────────────
+        if body.use_react:
+            agent = ReActAgent(
+                max_iterations=settings.react_max_iterations,
+                llm_router=orchestrator.llm,
+                memory=memory,
+            )
+            result = await agent.run(body.query, ctx)
+            answer = result.output or (result.error or "ReAct agent returned no answer.")
+            if body.session_id:
+                session = memory.sessions.get_or_create(body.session_id)
+                session.add("user", body.query)
+                session.add("assistant", answer)
             return QueryResponse(
-                answer=result["final_answer"],
-                confidence=result["confidence"],
+                answer=answer,
+                session_id=body.session_id,
+                usage=orchestrator.llm.get_total_usage(),
             )
 
-        result = await orchestrator.run(body.query, context=body.context)
+        # ── Reasoning engine ──────────────────────────────────────────────
+        if body.use_reasoning:
+            engine = ReasoningEngine(llm_router=orchestrator.llm, memory=memory)
+            result = await engine.reason(body.query, context=ctx)
+            answer = result["final_answer"]
+            if body.session_id:
+                session = memory.sessions.get_or_create(body.session_id)
+                session.add("user", body.query)
+                session.add("assistant", answer)
+            return QueryResponse(
+                answer=answer,
+                confidence=result["confidence"],
+                session_id=body.session_id,
+                usage=orchestrator.llm.get_total_usage(),
+            )
+
+        # ── Orchestrator ──────────────────────────────────────────────────
+        result = await orchestrator.run(body.query, context=ctx)
+        answer = result["final_answer"]
+        if body.session_id:
+            session = memory.sessions.get_or_create(body.session_id)
+            session.add("user", body.query)
+            session.add("assistant", answer)
         return QueryResponse(
             task_id=result["task_id"],
-            answer=result["final_answer"],
+            answer=answer,
             plan=result["plan"],
             agent_results=result["agent_results"],
+            session_id=body.session_id,
+            usage=orchestrator.llm.get_total_usage(),
+        )
+
+    # ── /query/stream ─────────────────────────────────────────────────────
+    @router.post("/query/stream", tags=["query"])
+    async def query_stream(
+        body: QueryRequest,
+        orchestrator: OrchestratorAgent = Depends(_get_orchestrator),
+        memory: MemoryManager = Depends(_get_memory),
+    ) -> StreamingResponse:
+        """Stream the AI response token-by-token via Server-Sent Events.
+
+        The response is a text/event-stream. Each event carries a JSON payload:
+        ``{"type": "token", "data": "<text chunk>"}``
+        A final ``{"type": "done"}`` event signals completion.
+        """
+        ctx = dict(body.context or {})
+        if body.session_id:
+            session = memory.sessions.get_or_create(body.session_id)
+            history = session.as_messages()
+            if history:
+                ctx.setdefault("session_history", history)
+
+        async def event_generator() -> AsyncIterator[str]:
+            # Build messages with session history
+            messages = []
+            if ctx.get("session_history"):
+                messages.extend(ctx["session_history"])
+            messages.append({"role": "user", "content": body.query})
+
+            full_response: List[str] = []
+            try:
+                async for chunk in orchestrator.llm.complete_stream(
+                    messages, task_type=TaskType.GENERAL
+                ):
+                    full_response.append(chunk)
+                    payload = json.dumps({"type": "token", "data": chunk})
+                    yield f"data: {payload}\n\n"
+            except Exception as exc:
+                error_payload = json.dumps({"type": "error", "data": str(exc)})
+                yield f"data: {error_payload}\n\n"
+                return
+
+            # Persist to session memory
+            if body.session_id:
+                session = memory.sessions.get_or_create(body.session_id)
+                session.add("user", body.query)
+                session.add("assistant", "".join(full_response))
+
+            yield f"data: {json.dumps({'type': 'done'})}\n\n"
+
+        return StreamingResponse(
+            event_generator(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
         )
 
     # ── /agents ───────────────────────────────────────────────────────────
@@ -158,6 +327,14 @@ def create_router() -> APIRouter:
                     "name": "StudioAgent",
                     "type": "studio",
                     "description": "Builds and deploys full applications (GitHub, Vercel, Netlify).",
+                },
+                {
+                    "name": "ReActAgent",
+                    "type": "react",
+                    "description": (
+                        "Autonomous Reasoning + Acting loop. Interleaves Thought, Action (search/"
+                        "python/memory tools), and Observation until a Final Answer is reached."
+                    ),
                 },
                 {
                     "name": "OrchestratorAgent",
@@ -230,6 +407,7 @@ def create_router() -> APIRouter:
             "short_term_entries": len(memory.short_term),
             "long_term_entries": len(memory.long_term.all_entries()),
             "recent_tasks": memory.tasks.recent_tasks(n=5),
+            "active_sessions": memory.sessions.active_count(),
         }
 
     @router.post("/memory/store", tags=["memory"])
@@ -251,6 +429,16 @@ def create_router() -> APIRouter:
         if value is None:
             raise HTTPException(404, f"Key '{key}' not found in long-term memory.")
         return {"key": key, "value": value}
+
+    # ── /sessions ─────────────────────────────────────────────────────────
+    @router.delete("/sessions/{session_id}", tags=["memory"])
+    async def clear_session(
+        session_id: str,
+        memory: MemoryManager = Depends(_get_memory),
+    ) -> Dict[str, str]:
+        """Clear the conversation history for a session."""
+        memory.sessions.clear(session_id)
+        return {"status": "cleared", "session_id": session_id}
 
     # ── /plugins ──────────────────────────────────────────────────────────
     @router.get("/plugins", tags=["plugins"])
@@ -294,3 +482,4 @@ def create_router() -> APIRouter:
         return await reducer.vote(body.query)
 
     return router
+

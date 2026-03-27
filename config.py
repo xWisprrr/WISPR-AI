@@ -73,6 +73,10 @@ class Settings(BaseSettings):
     # ── Plugins ───────────────────────────────────────────────────────────
     plugins_dir: str = "plugins"
 
+    # ── ReAct Agent ───────────────────────────────────────────────────────
+    react_max_iterations: int = 8
+    session_ttl_seconds: int = 3600
+    session_max_turns: int = 20
     # ── CORS ──────────────────────────────────────────────────────────────
     cors_origins: List[str] = ["*"]
 

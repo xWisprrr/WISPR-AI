@@ -556,5 +556,257 @@ class TestFastAPIApp(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
 
 
+# ── LLM Router — new features ─────────────────────────────────────────────────
+
+class TestLLMRouterUsage(unittest.TestCase):
+    def test_task_type_react_exists(self):
+        from llm.router import TaskType
+        self.assertIn("react", [t.value for t in TaskType])
+
+    def test_llm_usage_zero_on_new_router(self):
+        from llm.router import LLMRouter
+        router = LLMRouter()
+        usage = router.get_total_usage()
+        self.assertIn("prompt_tokens", usage)
+        self.assertIn("completion_tokens", usage)
+        self.assertIn("total_tokens", usage)
+        self.assertEqual(usage["total_tokens"], 0)
+
+    def test_llm_usage_dataclass(self):
+        from llm.router import LLMUsage
+        u = LLMUsage(prompt_tokens=10, completion_tokens=20, total_tokens=30)
+        d = u.to_dict()
+        self.assertEqual(d["prompt_tokens"], 10)
+        self.assertEqual(d["completion_tokens"], 20)
+        self.assertEqual(d["total_tokens"], 30)
+
+
+# ── Session Memory ────────────────────────────────────────────────────────────
+
+class TestSessionManager(unittest.TestCase):
+    def setUp(self):
+        from memory.session import SessionManager
+        self.mgr = SessionManager(ttl_seconds=3600, max_turns_per_session=10)
+
+    def test_create_session(self):
+        session = self.mgr.get_or_create("sess-1")
+        self.assertEqual(session.session_id, "sess-1")
+        self.assertEqual(len(session), 0)
+
+    def test_session_stores_messages(self):
+        session = self.mgr.get_or_create("sess-2")
+        session.add("user", "Hello")
+        session.add("assistant", "Hi there")
+        msgs = session.as_messages()
+        self.assertEqual(len(msgs), 2)
+        self.assertEqual(msgs[0]["role"], "user")
+        self.assertEqual(msgs[1]["role"], "assistant")
+
+    def test_session_max_turns(self):
+        from memory.session import SessionManager
+        session_manager = SessionManager(ttl_seconds=3600, max_turns_per_session=2)
+        session = session_manager.get_or_create("sess-3")
+        for i in range(10):
+            session.add("user", f"msg {i}")
+        # max_turns * 2 messages stored
+        self.assertLessEqual(len(session), 4)
+
+    def test_session_clear(self):
+        self.mgr.get_or_create("sess-4")
+        self.assertEqual(self.mgr.active_count(), 1)
+        self.mgr.clear("sess-4")
+        self.assertEqual(self.mgr.active_count(), 0)
+
+    def test_get_nonexistent_session(self):
+        session = self.mgr.get("nonexistent")
+        self.assertIsNone(session)
+
+    def test_same_session_returned(self):
+        s1 = self.mgr.get_or_create("sess-5")
+        s1.add("user", "hello")
+        s2 = self.mgr.get_or_create("sess-5")
+        self.assertEqual(len(s2), 1)
+
+
+# ── Memory Manager — session integration ─────────────────────────────────────
+
+class TestMemoryManagerSessions(unittest.TestCase):
+    def test_memory_manager_has_sessions(self):
+        from memory.manager import MemoryManager
+        mem = MemoryManager()
+        self.assertTrue(hasattr(mem, "sessions"))
+
+    def test_session_via_manager(self):
+        from memory.manager import MemoryManager
+        mem = MemoryManager()
+        session = mem.sessions.get_or_create("test-session")
+        session.add("user", "Hello from manager")
+        msgs = session.as_messages()
+        self.assertEqual(msgs[0]["content"], "Hello from manager")
+
+
+# ── ReAct Agent ───────────────────────────────────────────────────────────────
+
+class TestReActAgent(unittest.TestCase):
+    def _make_agent(self, mock_response: str):
+        """Build a ReActAgent with a mocked LLM that returns *mock_response*."""
+        from agents.react_agent import ReActAgent
+        from unittest.mock import AsyncMock, MagicMock
+
+        mock_llm = MagicMock()
+        mock_llm.complete = AsyncMock(return_value=mock_response)
+        mock_mem = MagicMock()
+        mock_mem.long_term.retrieve.return_value = None
+
+        agent = ReActAgent.__new__(ReActAgent)
+        agent.llm = mock_llm
+        agent.memory = mock_mem
+        agent.max_iterations = 5
+        return agent
+
+    def test_final_answer_extraction(self):
+        from agents.react_agent import ReActAgent
+        agent = ReActAgent.__new__(ReActAgent)
+        text = "Thought: I know the answer.\nFinal Answer: 42"
+        self.assertEqual(agent._extract_final_answer(text), "42")
+
+    def test_no_final_answer_returns_none(self):
+        from agents.react_agent import ReActAgent
+        agent = ReActAgent.__new__(ReActAgent)
+        self.assertIsNone(agent._extract_final_answer("Thought: still thinking"))
+
+    def test_parse_tool_call(self):
+        from agents.react_agent import ReActAgent
+        agent = ReActAgent.__new__(ReActAgent)
+        name, arg = agent._parse_tool_call('search("python tutorial")')
+        self.assertEqual(name, "search")
+        self.assertEqual(arg, "python tutorial")
+
+    def test_parse_tool_call_unknown(self):
+        from agents.react_agent import ReActAgent
+        agent = ReActAgent.__new__(ReActAgent)
+        name, arg = agent._parse_tool_call("not a valid call")
+        self.assertIsNone(name)
+
+    def test_run_with_immediate_final_answer(self):
+        agent = self._make_agent("Thought: Easy.\nFinal Answer: The answer is 4.")
+        result = asyncio.get_event_loop().run_until_complete(
+            agent.run("What is 2+2?")
+        )
+        self.assertTrue(result.success)
+        self.assertIn("4", result.output)
+        self.assertEqual(result.metadata["iterations"], 1)
+
+    def test_run_python_tool(self):
+        from agents.react_agent import ReActAgent
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        agent = ReActAgent.__new__(ReActAgent)
+        agent.max_iterations = 3
+        agent.memory = MagicMock()
+        agent.memory.long_term.retrieve.return_value = None
+
+        responses = [
+            "Thought: I'll compute this.\nAction: python(print(2+2))",
+            "Thought: Got the result.\nFinal Answer: The answer is 4.",
+        ]
+        call_count = 0
+
+        async def mock_complete(*args, **kwargs):
+            nonlocal call_count
+            r = responses[min(call_count, len(responses) - 1)]
+            call_count += 1
+            return r
+
+        agent.llm = MagicMock()
+        agent.llm.complete = mock_complete
+
+        with patch.object(agent, "_tool_python", AsyncMock(return_value="4")) as mock_py:
+            result = asyncio.get_event_loop().run_until_complete(
+                agent.run("What is 2+2?")
+            )
+        self.assertTrue(result.success)
+        mock_py.assert_called_once()
+
+    def test_memory_tool(self):
+        from agents.react_agent import ReActAgent
+        from unittest.mock import MagicMock
+
+        agent = ReActAgent.__new__(ReActAgent)
+        agent.memory = MagicMock()
+        agent.memory.long_term.retrieve.return_value = "Paris"
+        result = agent._tool_memory("capital_france")
+        self.assertEqual(result, "Paris")
+
+    def test_memory_tool_missing(self):
+        from agents.react_agent import ReActAgent
+        from unittest.mock import MagicMock
+
+        agent = ReActAgent.__new__(ReActAgent)
+        agent.memory = MagicMock()
+        agent.memory.long_term.retrieve.return_value = None
+        result = agent._tool_memory("unknown_key")
+        self.assertIn("No entry found", result)
+
+
+# ── FastAPI — new endpoints ───────────────────────────────────────────────────
+
+class TestNewAPIEndpoints(unittest.TestCase):
+    def setUp(self):
+        from main import create_app
+        from fastapi.testclient import TestClient
+        self.client = TestClient(create_app())
+
+    def test_health_endpoint_returns_200(self):
+        response = self.client.get("/health")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertIn("status", data)
+        self.assertIn("checks", data)
+        self.assertIn("timestamp", data)
+
+    def test_health_has_subsystem_checks(self):
+        response = self.client.get("/health")
+        checks = response.json()["checks"]
+        for key in ("memory", "plugins", "llm", "agents"):
+            self.assertIn(key, checks)
+
+    def test_agents_includes_react(self):
+        response = self.client.get("/agents")
+        self.assertEqual(response.status_code, 200)
+        names = [a["name"] for a in response.json()["agents"]]
+        self.assertIn("ReActAgent", names)
+
+    def test_memory_overview_has_sessions(self):
+        response = self.client.get("/memory")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertIn("active_sessions", data)
+
+    def test_clear_session_endpoint(self):
+        response = self.client.delete("/sessions/test-session-xyz")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["status"], "cleared")
+        self.assertEqual(data["session_id"], "test-session-xyz")
+
+    def test_system_status_includes_react(self):
+        response = self.client.get("/")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertIn("ReActAgent", data["agents"])
+
+    def test_query_response_has_usage_field(self):
+        """QueryResponse model should include a usage field (can be None)."""
+        from api.routes import QueryResponse
+        qr = QueryResponse(answer="hello")
+        self.assertIsNone(qr.usage)
+
+    def test_query_response_has_session_id_field(self):
+        from api.routes import QueryResponse
+        qr = QueryResponse(answer="hi", session_id="abc")
+        self.assertEqual(qr.session_id, "abc")
+
+
 if __name__ == "__main__":
     unittest.main()
