@@ -180,7 +180,7 @@ class ReasoningEngine:
                 try:
                     confidence = float(line.split(":", 1)[1].strip())
                 except ValueError:
-                    pass
+                    logger.debug("Could not parse CONFIDENCE value from reflection response")
             elif line.startswith("ISSUES:"):
                 issues_text = line.split(":", 1)[1].strip()
                 if issues_text.lower() != "none":

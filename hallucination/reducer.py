@@ -125,7 +125,8 @@ class HallucinationReducer:
         ]
         try:
             return await self.llm.complete(messages, task_type=TaskType.REASONING)
-        except Exception:
+        except Exception as exc:
+            logger.warning("Consensus finding failed: %s", exc)
             return answers[0]
 
     async def _score_confidence(self, question: str, answer: str) -> float:
@@ -141,7 +142,8 @@ class HallucinationReducer:
         try:
             raw = await self.llm.complete(messages, task_type=TaskType.GENERAL, temperature=0.0)
             return min(max(float(raw.strip()), 0.0), 1.0)
-        except Exception:
+        except Exception as exc:
+            logger.debug("Confidence scoring failed: %s", exc)
             return 0.5
 
     @staticmethod
@@ -158,7 +160,7 @@ class HallucinationReducer:
                 try:
                     result["confidence"] = float(line.split(":", 1)[1].strip())
                 except ValueError:
-                    pass
+                    logger.debug("Could not parse CONFIDENCE value from verification response")
             elif line.startswith("EXPLANATION:"):
                 result["explanation"] = line.split(":", 1)[1].strip()
         return result

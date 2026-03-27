@@ -195,7 +195,157 @@ class TestAgentResult(unittest.TestCase):
         self.assertEqual(r.error, "boom")
 
 
-# ── Plugin Manager ────────────────────────────────────────────────────────────
+# ── Complexity Classification ─────────────────────────────────────────────────
+
+class TestComplexityClassification(unittest.TestCase):
+    """Tests for OrchestratorAgent._classify_complexity and simple/complex routing."""
+
+    def _make_orchestrator(self, llm_response: str):
+        """Build an OrchestratorAgent whose LLM always returns *llm_response*."""
+        from agents.orchestrator import OrchestratorAgent
+        from memory.manager import MemoryManager
+
+        memory = MemoryManager()
+        orch = OrchestratorAgent.__new__(OrchestratorAgent)
+        orch.memory = memory
+
+        mock_llm = MagicMock()
+        mock_llm.complete = AsyncMock(return_value=llm_response)
+        orch.llm = mock_llm
+        return orch
+
+    def test_classify_simple(self):
+        orch = self._make_orchestrator("SIMPLE")
+        result = asyncio.get_event_loop().run_until_complete(
+            orch._classify_complexity("What is 2 + 2?")
+        )
+        self.assertEqual(result, "simple")
+
+    def test_classify_complex(self):
+        orch = self._make_orchestrator("COMPLEX")
+        result = asyncio.get_event_loop().run_until_complete(
+            orch._classify_complexity("Build a full-stack web app with authentication.")
+        )
+        self.assertEqual(result, "complex")
+
+    def test_classify_defaults_to_complex_on_llm_error(self):
+        from agents.orchestrator import OrchestratorAgent
+        from memory.manager import MemoryManager
+
+        orch = OrchestratorAgent.__new__(OrchestratorAgent)
+        orch.memory = MemoryManager()
+
+        mock_llm = MagicMock()
+        mock_llm.complete = AsyncMock(side_effect=RuntimeError("LLM down"))
+        orch.llm = mock_llm
+
+        result = asyncio.get_event_loop().run_until_complete(
+            orch._classify_complexity("Hello!")
+        )
+        self.assertEqual(result, "complex")
+
+    def test_simple_task_returns_empty_plan(self):
+        """Simple tasks should bypass orchestration (plan == [])."""
+        from agents.orchestrator import OrchestratorAgent
+        from agents.base_agent import AgentResult
+        from memory.manager import MemoryManager
+
+        memory = MemoryManager()
+        orch = OrchestratorAgent.__new__(OrchestratorAgent)
+        orch.memory = memory
+
+        # LLM for classify returns SIMPLE; CoreAgent returns a short answer
+        mock_llm = MagicMock()
+        mock_llm.complete = AsyncMock(return_value="SIMPLE")
+        orch.llm = mock_llm
+        orch.reasoning = MagicMock()
+
+        mock_core = MagicMock()
+        mock_core.name = "CoreAgent"
+        mock_core.run = AsyncMock(
+            return_value=AgentResult(
+                success=True, output="Paris.", agent_name="CoreAgent", task_type="reasoning"
+            )
+        )
+        orch._agents = {"CoreAgent": mock_core}
+
+        result = asyncio.get_event_loop().run_until_complete(
+            orch.run("What is the capital of France?")
+        )
+        self.assertEqual(result["plan"], [])
+        self.assertEqual(result["final_answer"], "Paris.")
+
+    def test_simple_task_passes_concise_context(self):
+        """CoreAgent must receive response_style=concise for simple tasks."""
+        from agents.orchestrator import OrchestratorAgent
+        from agents.base_agent import AgentResult
+        from memory.manager import MemoryManager
+
+        memory = MemoryManager()
+        orch = OrchestratorAgent.__new__(OrchestratorAgent)
+        orch.memory = memory
+
+        mock_llm = MagicMock()
+        mock_llm.complete = AsyncMock(return_value="SIMPLE")
+        orch.llm = mock_llm
+        orch.reasoning = MagicMock()
+
+        captured_context: list = []
+
+        async def capture_run(task, context=None):
+            captured_context.append(context)
+            return AgentResult(
+                success=True, output="42.", agent_name="CoreAgent", task_type="reasoning"
+            )
+
+        mock_core = MagicMock()
+        mock_core.name = "CoreAgent"
+        mock_core.run = capture_run
+        orch._agents = {"CoreAgent": mock_core}
+
+        asyncio.get_event_loop().run_until_complete(
+            orch.run("What is 6 times 7?")
+        )
+        self.assertTrue(len(captured_context) > 0)
+        self.assertEqual(captured_context[0].get("response_style"), "concise")
+
+
+# ── CoreAgent concise mode ────────────────────────────────────────────────────
+
+class TestCoreAgentConciseMode(unittest.TestCase):
+    """CoreAgent should use the concise system prompt when response_style=concise."""
+
+    def _make_core_agent(self, llm_response: str):
+        from agents.core_agent import CoreAgent
+        from memory.manager import MemoryManager
+
+        memory = MemoryManager()
+        mock_llm = MagicMock()
+        mock_llm.complete = AsyncMock(return_value=llm_response)
+        return CoreAgent(llm_router=mock_llm, memory=memory)
+
+    def test_concise_mode_uses_concise_prompt(self):
+        agent = self._make_core_agent("Yes.")
+        asyncio.get_event_loop().run_until_complete(
+            agent.run("Is the sky blue?", context={"response_style": "concise"})
+        )
+        # Verify the concise system prompt was used (check for its key instruction)
+        call_args = agent.llm.complete.call_args
+        messages = call_args[0][0]
+        self.assertIn("concisely", messages[0]["content"].lower())
+        self.assertIn("one or two sentences", messages[0]["content"].lower())
+
+    def test_normal_mode_uses_default_prompt(self):
+        agent = self._make_core_agent("The sky is blue because of Rayleigh scattering.")
+        asyncio.get_event_loop().run_until_complete(
+            agent.run("Why is the sky blue?")
+        )
+        call_args = agent.llm.complete.call_args
+        messages = call_args[0][0]
+        # Default prompt emphasises structured reasoning, not conciseness
+        self.assertIn("reasoning", messages[0]["content"].lower())
+        self.assertNotIn("one or two sentences", messages[0]["content"].lower())
+
 
 class TestPluginManager(unittest.TestCase):
     def setUp(self):
@@ -298,8 +448,8 @@ class TestFastAPIApp(unittest.TestCase):
 
         app = create_app()
         client = TestClient(app)
-        # The system status endpoint should return 200 without LLM
-        response = client.get("/")
+        # The system status endpoint (moved to /api/status; / now serves the UI)
+        response = client.get("/api/status")
         self.assertEqual(response.status_code, 200)
         data = response.json()
         self.assertEqual(data["status"], "online")
@@ -510,6 +660,258 @@ class TestCodeBlockExtraction(unittest.TestCase):
         text = "```python\ncode1\n```\nsome text\n```javascript\ncode2\n```"
         blocks = self.engine._extract_blocks(text)
         self.assertEqual(len(blocks), 2)
+
+
+# ── LLM Router — new features ─────────────────────────────────────────────────
+
+class TestLLMRouterUsage(unittest.TestCase):
+    def test_task_type_react_exists(self):
+        from llm.router import TaskType
+        self.assertIn("react", [t.value for t in TaskType])
+
+    def test_llm_usage_zero_on_new_router(self):
+        from llm.router import LLMRouter
+        router = LLMRouter()
+        usage = router.get_total_usage()
+        self.assertIn("prompt_tokens", usage)
+        self.assertIn("completion_tokens", usage)
+        self.assertIn("total_tokens", usage)
+        self.assertEqual(usage["total_tokens"], 0)
+
+    def test_llm_usage_dataclass(self):
+        from llm.router import LLMUsage
+        u = LLMUsage(prompt_tokens=10, completion_tokens=20, total_tokens=30)
+        d = u.to_dict()
+        self.assertEqual(d["prompt_tokens"], 10)
+        self.assertEqual(d["completion_tokens"], 20)
+        self.assertEqual(d["total_tokens"], 30)
+
+
+# ── Session Memory ────────────────────────────────────────────────────────────
+
+class TestSessionManager(unittest.TestCase):
+    def setUp(self):
+        from memory.session import SessionManager
+        self.mgr = SessionManager(ttl_seconds=3600, max_turns_per_session=10)
+
+    def test_create_session(self):
+        session = self.mgr.get_or_create("sess-1")
+        self.assertEqual(session.session_id, "sess-1")
+        self.assertEqual(len(session), 0)
+
+    def test_session_stores_messages(self):
+        session = self.mgr.get_or_create("sess-2")
+        session.add("user", "Hello")
+        session.add("assistant", "Hi there")
+        msgs = session.as_messages()
+        self.assertEqual(len(msgs), 2)
+        self.assertEqual(msgs[0]["role"], "user")
+        self.assertEqual(msgs[1]["role"], "assistant")
+
+    def test_session_max_turns(self):
+        from memory.session import SessionManager
+        session_manager = SessionManager(ttl_seconds=3600, max_turns_per_session=2)
+        session = session_manager.get_or_create("sess-3")
+        for i in range(10):
+            session.add("user", f"msg {i}")
+        # max_turns * 2 messages stored
+        self.assertLessEqual(len(session), 4)
+
+    def test_session_clear(self):
+        self.mgr.get_or_create("sess-4")
+        self.assertEqual(self.mgr.active_count(), 1)
+        self.mgr.clear("sess-4")
+        self.assertEqual(self.mgr.active_count(), 0)
+
+    def test_get_nonexistent_session(self):
+        session = self.mgr.get("nonexistent")
+        self.assertIsNone(session)
+
+    def test_same_session_returned(self):
+        s1 = self.mgr.get_or_create("sess-5")
+        s1.add("user", "hello")
+        s2 = self.mgr.get_or_create("sess-5")
+        self.assertEqual(len(s2), 1)
+
+
+# ── Memory Manager — session integration ─────────────────────────────────────
+
+class TestMemoryManagerSessions(unittest.TestCase):
+    def test_memory_manager_has_sessions(self):
+        from memory.manager import MemoryManager
+        mem = MemoryManager()
+        self.assertTrue(hasattr(mem, "sessions"))
+
+    def test_session_via_manager(self):
+        from memory.manager import MemoryManager
+        mem = MemoryManager()
+        session = mem.sessions.get_or_create("test-session")
+        session.add("user", "Hello from manager")
+        msgs = session.as_messages()
+        self.assertEqual(msgs[0]["content"], "Hello from manager")
+
+
+# ── ReAct Agent ───────────────────────────────────────────────────────────────
+
+class TestReActAgent(unittest.TestCase):
+    def _make_agent(self, mock_response: str):
+        """Build a ReActAgent with a mocked LLM that returns *mock_response*."""
+        from agents.react_agent import ReActAgent
+        from unittest.mock import AsyncMock, MagicMock
+
+        mock_llm = MagicMock()
+        mock_llm.complete = AsyncMock(return_value=mock_response)
+        mock_mem = MagicMock()
+        mock_mem.long_term.retrieve.return_value = None
+
+        agent = ReActAgent.__new__(ReActAgent)
+        agent.llm = mock_llm
+        agent.memory = mock_mem
+        agent.max_iterations = 5
+        return agent
+
+    def test_final_answer_extraction(self):
+        from agents.react_agent import ReActAgent
+        agent = ReActAgent.__new__(ReActAgent)
+        text = "Thought: I know the answer.\nFinal Answer: 42"
+        self.assertEqual(agent._extract_final_answer(text), "42")
+
+    def test_no_final_answer_returns_none(self):
+        from agents.react_agent import ReActAgent
+        agent = ReActAgent.__new__(ReActAgent)
+        self.assertIsNone(agent._extract_final_answer("Thought: still thinking"))
+
+    def test_parse_tool_call(self):
+        from agents.react_agent import ReActAgent
+        agent = ReActAgent.__new__(ReActAgent)
+        name, arg = agent._parse_tool_call('search("python tutorial")')
+        self.assertEqual(name, "search")
+        self.assertEqual(arg, "python tutorial")
+
+    def test_parse_tool_call_unknown(self):
+        from agents.react_agent import ReActAgent
+        agent = ReActAgent.__new__(ReActAgent)
+        name, arg = agent._parse_tool_call("not a valid call")
+        self.assertIsNone(name)
+
+    def test_run_with_immediate_final_answer(self):
+        agent = self._make_agent("Thought: Easy.\nFinal Answer: The answer is 4.")
+        result = asyncio.get_event_loop().run_until_complete(
+            agent.run("What is 2+2?")
+        )
+        self.assertTrue(result.success)
+        self.assertIn("4", result.output)
+        self.assertEqual(result.metadata["iterations"], 1)
+
+    def test_run_python_tool(self):
+        from agents.react_agent import ReActAgent
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        agent = ReActAgent.__new__(ReActAgent)
+        agent.max_iterations = 3
+        agent.memory = MagicMock()
+        agent.memory.long_term.retrieve.return_value = None
+
+        responses = [
+            "Thought: I'll compute this.\nAction: python(print(2+2))",
+            "Thought: Got the result.\nFinal Answer: The answer is 4.",
+        ]
+        call_count = 0
+
+        async def mock_complete(*args, **kwargs):
+            nonlocal call_count
+            r = responses[min(call_count, len(responses) - 1)]
+            call_count += 1
+            return r
+
+        agent.llm = MagicMock()
+        agent.llm.complete = mock_complete
+
+        with patch.object(agent, "_tool_python", AsyncMock(return_value="4")) as mock_py:
+            result = asyncio.get_event_loop().run_until_complete(
+                agent.run("What is 2+2?")
+            )
+        self.assertTrue(result.success)
+        mock_py.assert_called_once()
+
+    def test_memory_tool(self):
+        from agents.react_agent import ReActAgent
+        from unittest.mock import MagicMock
+
+        agent = ReActAgent.__new__(ReActAgent)
+        agent.memory = MagicMock()
+        agent.memory.long_term.retrieve.return_value = "Paris"
+        result = agent._tool_memory("capital_france")
+        self.assertEqual(result, "Paris")
+
+    def test_memory_tool_missing(self):
+        from agents.react_agent import ReActAgent
+        from unittest.mock import MagicMock
+
+        agent = ReActAgent.__new__(ReActAgent)
+        agent.memory = MagicMock()
+        agent.memory.long_term.retrieve.return_value = None
+        result = agent._tool_memory("unknown_key")
+        self.assertIn("No entry found", result)
+
+
+# ── FastAPI — new endpoints ───────────────────────────────────────────────────
+
+class TestNewAPIEndpoints(unittest.TestCase):
+    def setUp(self):
+        from main import create_app
+        from fastapi.testclient import TestClient
+        self.client = TestClient(create_app())
+
+    def test_health_endpoint_returns_200(self):
+        response = self.client.get("/health")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertIn("status", data)
+        self.assertIn("checks", data)
+        self.assertIn("timestamp", data)
+
+    def test_health_has_subsystem_checks(self):
+        response = self.client.get("/health")
+        checks = response.json()["checks"]
+        for key in ("memory", "plugins", "llm", "agents"):
+            self.assertIn(key, checks)
+
+    def test_agents_includes_react(self):
+        response = self.client.get("/agents")
+        self.assertEqual(response.status_code, 200)
+        names = [a["name"] for a in response.json()["agents"]]
+        self.assertIn("ReActAgent", names)
+
+    def test_memory_overview_has_sessions(self):
+        response = self.client.get("/memory")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertIn("active_sessions", data)
+
+    def test_clear_session_endpoint(self):
+        response = self.client.delete("/sessions/test-session-xyz")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["status"], "cleared")
+        self.assertEqual(data["session_id"], "test-session-xyz")
+
+    def test_system_status_includes_react(self):
+        response = self.client.get("/")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertIn("ReActAgent", data["agents"])
+
+    def test_query_response_has_usage_field(self):
+        """QueryResponse model should include a usage field (can be None)."""
+        from api.routes import QueryResponse
+        qr = QueryResponse(answer="hello")
+        self.assertIsNone(qr.usage)
+
+    def test_query_response_has_session_id_field(self):
+        from api.routes import QueryResponse
+        qr = QueryResponse(answer="hi", session_id="abc")
+        self.assertEqual(qr.session_id, "abc")
 
 
 if __name__ == "__main__":

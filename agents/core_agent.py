@@ -17,6 +17,13 @@ Always structure your responses clearly with well-organized reasoning.
 When uncertain, say so explicitly rather than hallucinating facts.
 """
 
+_CONCISE_SYSTEM_PROMPT = """\
+You are WISPR Core — a highly capable general-purpose AI assistant.
+Answer the question directly and concisely. Do not over-explain or add unnecessary padding.
+For simple questions, one or two sentences are enough.
+When uncertain, say so explicitly rather than hallucinating facts.
+"""
+
 
 class CoreAgent(BaseAgent):
     """General-purpose conversational and reasoning agent."""
@@ -30,7 +37,14 @@ class CoreAgent(BaseAgent):
         ctx = context or {}
         history = self.memory.short_term.as_messages(n=8)
 
-        messages = [{"role": "system", "content": _SYSTEM_PROMPT}]
+        # Use concise prompt when the orchestrator flags this as a simple task
+        system_prompt = (
+            _CONCISE_SYSTEM_PROMPT
+            if ctx.get("response_style") == "concise"
+            else _SYSTEM_PROMPT
+        )
+
+        messages = [{"role": "system", "content": system_prompt}]
         if history:
             messages.extend(history)
         messages.append({"role": "user", "content": task})

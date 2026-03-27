@@ -11,10 +11,12 @@ WISPR AI OS is a full AI operating system that can:
 | Capability | Description |
 |---|---|
 | **Think** | Multi-step reasoning loops with self-reflection |
+| **Act** | ReAct agent: Reason → Act (search/code/memory tools) → Observe, iteratively |
 | **Code** | Multi-language code generation, debugging, optimisation |
 | **Search** | 50+ search engines queried in parallel |
 | **Build** | Browser IDE + one-click deployment |
-| **Learn** | Short-term, long-term, and task memory |
+| **Learn** | Short-term, long-term, task, and per-session memory |
+| **Stream** | Real-time token streaming via Server-Sent Events |
 
 ---
 
@@ -32,10 +34,12 @@ WISPR-AI/
 │   ├── coder_agent.py       # Code generation, debug, optimisation
 │   ├── search_agent.py      # MegaSearch + LLM synthesis
 │   ├── studio_agent.py      # Full-app builder & deployment
+│   ├── react_agent.py       # ReAct: Reason-Act-Observe iterative loop
 │   └── orchestrator.py      # Parallel agent coordination
 │
 ├── llm/                     # Multi-LLM Intelligence Layer
-│   └── router.py            # LiteLLM-based model routing + fallback
+│   └── router.py            # LiteLLM routing, streaming, structured outputs,
+│                            #   token usage tracking
 │
 ├── search/                  # MegaSearch Engine
 │   └── mega_search.py       # 50+ sources queried concurrently
@@ -44,6 +48,7 @@ WISPR-AI/
 │   ├── short_term.py        # In-process ring buffer
 │   ├── long_term.py         # JSON-persisted key-value store
 │   ├── task_memory.py       # Multi-step task history
+│   ├── session.py           # Per-session conversation threading
 │   └── manager.py           # Unified memory interface
 │
 ├── reasoning/               # Autonomous Reasoning Engine
@@ -65,7 +70,7 @@ WISPR-AI/
 │   └── routes.py            # All REST endpoints
 │
 └── tests/
-    └── test_wispr.py        # Comprehensive test suite
+    └── test_wispr.py        # Comprehensive test suite (67 tests)
 ```
 
 ---
@@ -96,6 +101,7 @@ GROQ_API_KEY=...
 REASONING_MODEL=gpt-4o
 CODING_MODEL=gpt-4o
 SEARCH_MODEL=gpt-4o-mini
+REACT_MAX_ITERATIONS=8
 ```
 
 ### 3. Run the server
@@ -114,16 +120,19 @@ Open **http://localhost:8000/docs** for the interactive Swagger UI.
 
 | Method | Endpoint | Description |
 |---|---|---|
-| `GET` | `/` | System status & health |
-| `POST` | `/query` | Main AI interface (orchestrator) |
+| `GET` | `/` | System status & info |
+| `GET` | `/health` | Detailed subsystem health check |
+| `POST` | `/query` | Main AI interface — orchestrator, reasoning, or ReAct |
+| `POST` | `/query/stream` | Streaming response via Server-Sent Events |
 | `GET` | `/agents` | List all agents |
 | `POST` | `/search` | MegaSearch across 50+ sources |
 | `POST` | `/code` | Code: generate / debug / optimise / translate |
 | `POST` | `/studio/execute` | Run code in sandboxed IDE |
 | `POST` | `/studio/deploy` | Deploy to GitHub / Vercel / Netlify |
-| `GET` | `/memory` | Memory overview |
+| `GET` | `/memory` | Memory overview (includes active session count) |
 | `POST` | `/memory/store` | Store to long-term memory |
 | `GET` | `/memory/retrieve/{key}` | Retrieve from long-term memory |
+| `DELETE` | `/sessions/{session_id}` | Clear a conversation session |
 | `GET` | `/plugins` | List loaded plugins |
 | `POST` | `/plugins/invoke` | Invoke a plugin |
 | `POST` | `/reason` | Autonomous multi-step reasoning |
@@ -135,6 +144,21 @@ Open **http://localhost:8000/docs** for the interactive Swagger UI.
 
 ### OrchestratorAgent
 Receives complex tasks, decomposes them into sub-tasks, runs all sub-agents **in parallel**, and synthesises results into a single coherent answer.
+
+### ReActAgent *(new — state of the art)*
+Implements the **ReAct (Reasoning + Acting)** pattern. The agent iterates through:
+
+```
+Thought:  <step-by-step reasoning>
+Action:   tool_name(argument)
+Observation: <tool result — filled in automatically>
+...repeat...
+Final Answer: <complete response>
+```
+
+Available tools: **`search`** (MegaSearch), **`python`** (sandboxed code execution), **`memory`** (long-term memory lookup).
+
+Invoke via `/query` with `"use_react": true`, or route the task to `"ReActAgent"` in the orchestrator plan.
 
 ### CoreAgent
 General-purpose reasoning and conversation. Uses session memory for context continuity.
@@ -152,7 +176,7 @@ Designs full-stack applications, writes all files, and provides deployment instr
 
 ## Multi-LLM Routing
 
-The `LLMRouter` (powered by [LiteLLM](https://github.com/BerriAI/litellm)) automatically selects the best model per task type:
+The `LLMRouter` (powered by [LiteLLM](https://github.com/BerriAI/litellm)) automatically selects the best model per task type and tracks token usage:
 
 | Task | Default Model |
 |---|---|
@@ -160,9 +184,51 @@ The `LLMRouter` (powered by [LiteLLM](https://github.com/BerriAI/litellm)) autom
 | Coding | `gpt-4o` |
 | Search | `gpt-4o-mini` |
 | General | `gpt-4o-mini` |
+| ReAct | `gpt-4o` |
 | Fallback | `gpt-4o-mini` |
 
+New in this release:
+- **`complete_with_usage()`** — returns `(text, LLMUsage)` with prompt/completion/total token counts
+- **`structured_complete()`** — forces JSON-mode output validated against a Pydantic schema
+- **`get_total_usage()`** — exposes cumulative token usage per router instance (visible at `/health`)
+- **Streaming** — `complete_stream()` yields text chunks for real-time SSE delivery
+
 Switch to any LiteLLM-supported provider by changing the model names in `.env`.
+
+---
+
+## Streaming (Server-Sent Events)
+
+Use `POST /query/stream` to receive responses token-by-token:
+
+```python
+import httpx, json
+
+with httpx.stream("POST", "http://localhost:8000/query/stream",
+                  json={"query": "Explain quantum entanglement"}) as r:
+    for line in r.iter_lines():
+        if line.startswith("data: "):
+            event = json.loads(line[6:])
+            if event["type"] == "token":
+                print(event["data"], end="", flush=True)
+            elif event["type"] == "done":
+                break
+```
+
+---
+
+## Session-Based Conversation Threading
+
+Pass a `session_id` to `/query` or `/query/stream` to maintain conversation history across turns:
+
+```json
+{
+  "query": "What is the capital of France?",
+  "session_id": "user-42-chat"
+}
+```
+
+Follow-up requests with the same `session_id` automatically receive the previous conversation as context. Sessions expire after one hour of inactivity. Clear a session with `DELETE /sessions/{session_id}`.
 
 ---
 
@@ -188,6 +254,7 @@ Queries all sources **concurrently** and deduplicates results:
 | Short-term | In-process ring buffer | Session context for LLM |
 | Long-term | JSON file | Persistent knowledge across restarts |
 | Task memory | JSON file | Step-by-step task history |
+| Session memory | In-process dict | Per-session conversation threading |
 
 ---
 
