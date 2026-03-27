@@ -460,8 +460,8 @@ class TestFastAPIApp(unittest.TestCase):
 
         app = create_app()
         client = TestClient(app)
-        # The system status endpoint should return 200 without LLM
-        response = client.get("/")
+        # The system status endpoint (moved to /api/status; / now serves the UI)
+        response = client.get("/api/status")
         self.assertEqual(response.status_code, 200)
         data = response.json()
         self.assertEqual(data["status"], "online")
