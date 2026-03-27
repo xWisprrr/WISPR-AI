@@ -183,4 +183,6 @@ class CodingEngine:
 
     @staticmethod
     def _extract_blocks(text: str) -> List[str]:
-        return re.findall(r"```(?:\w+)?\n(.*?)```", text, flags=re.DOTALL)
+        # Match fenced blocks with or without a language identifier, with or without
+        # a newline immediately after the opening fence (e.g. ```python\n or ```python ).
+        return re.findall(r"```(?:\w+)?\n?(.*?)```", text, flags=re.DOTALL)

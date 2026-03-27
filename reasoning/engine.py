@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Dict, List, Optional
 
 from llm.router import LLMRouter, TaskType
@@ -126,7 +127,6 @@ class ReasoningEngine:
             if not line:
                 continue
             # Accept lines like "1. Do something" or "1) Do something"
-            import re
             match = re.match(r"^(\d+)[.)]\s+(.*)", line)
             if match:
                 num = int(match.group(1))

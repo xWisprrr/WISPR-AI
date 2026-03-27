@@ -242,18 +242,14 @@ def register():
 
         pm = PluginManager(plugins_dir=self._tmp)
         pm.register_plugin(Plugin("InvokePlugin", "1.0", "Invoke test", my_handler))
-        result = asyncio.get_event_loop().run_until_complete(
-            pm.invoke("InvokePlugin", "test_task")
-        )
+        result = asyncio.run(pm.invoke("InvokePlugin", "test_task"))
         self.assertEqual(result, "result:test_task")
 
     def test_invoke_unknown_plugin(self):
         from plugins.plugin_manager import PluginManager
         pm = PluginManager(plugins_dir=self._tmp)
         with self.assertRaises(KeyError):
-            asyncio.get_event_loop().run_until_complete(
-                pm.invoke("NonExistent", "task")
-            )
+            asyncio.run(pm.invoke("NonExistent", "task"))
 
 
 # ── Studio IDE ────────────────────────────────────────────────────────────────
@@ -265,30 +261,22 @@ class TestStudioIDE(unittest.TestCase):
         self.ide = StudioIDE(sandbox_dir=self._tmp)
 
     def test_unsupported_language(self):
-        result = asyncio.get_event_loop().run_until_complete(
-            self.ide.execute("code", language="brainfuck")
-        )
+        result = asyncio.run(self.ide.execute("code", language="brainfuck"))
         self.assertFalse(result["success"])
         self.assertIn("Unsupported", result["stderr"])
 
     def test_deploy_github_steps(self):
-        result = asyncio.get_event_loop().run_until_complete(
-            self.ide.deploy("/my/project", "github", {"repo": "me/repo"})
-        )
+        result = asyncio.run(self.ide.deploy("/my/project", "github", {"repo": "me/repo"}))
         self.assertTrue(result["success"])
         self.assertIn("github", result["target"])
         self.assertTrue(len(result["steps"]) > 0)
 
     def test_deploy_unknown_target(self):
-        result = asyncio.get_event_loop().run_until_complete(
-            self.ide.deploy("/my/project", "unknown_cloud")
-        )
+        result = asyncio.run(self.ide.deploy("/my/project", "unknown_cloud"))
         self.assertFalse(result["success"])
 
     def test_execute_python(self):
-        result = asyncio.get_event_loop().run_until_complete(
-            self.ide.execute('print("wispr")', language="python")
-        )
+        result = asyncio.run(self.ide.execute('print("wispr")', language="python"))
         self.assertTrue(result["success"])
         self.assertIn("wispr", result["stdout"])
 
@@ -404,6 +392,124 @@ class TestFastAPIApp(unittest.TestCase):
             json={"task": "do something", "action": "invalid_action"},
         )
         self.assertEqual(response.status_code, 400)
+
+    def test_memory_search_endpoint(self):
+        from main import create_app
+        from fastapi.testclient import TestClient
+
+        app = create_app()
+        client = TestClient(app)
+
+        # Store a value first
+        client.post("/memory/store", json={"key": "search_test", "value": "machine learning"})
+
+        response = client.get("/memory/search?q=machine")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertIn("results", data)
+        self.assertGreaterEqual(len(data["results"]), 1)
+
+    def test_memory_search_empty_query(self):
+        from main import create_app
+        from fastapi.testclient import TestClient
+
+        app = create_app()
+        client = TestClient(app)
+        response = client.get("/memory/search?q=")
+        self.assertEqual(response.status_code, 400)
+
+    def test_memory_delete_endpoint(self):
+        from main import create_app
+        from fastapi.testclient import TestClient
+
+        app = create_app()
+        client = TestClient(app)
+
+        client.post("/memory/store", json={"key": "to_delete", "value": "bye"})
+        response = client.delete("/memory/to_delete")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "deleted")
+
+        # Should be gone now
+        retrieve = client.get("/memory/retrieve/to_delete")
+        self.assertEqual(retrieve.status_code, 404)
+
+    def test_memory_delete_not_found(self):
+        from main import create_app
+        from fastapi.testclient import TestClient
+
+        app = create_app()
+        client = TestClient(app)
+        response = client.delete("/memory/nonexistent_key_xyz")
+        self.assertEqual(response.status_code, 404)
+
+    def test_memory_short_term_endpoint(self):
+        from main import create_app
+        from fastapi.testclient import TestClient
+
+        app = create_app()
+        client = TestClient(app)
+        response = client.get("/memory/short_term")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertIn("total_entries", data)
+        self.assertIn("messages", data)
+
+    def test_memory_clear_short_term_endpoint(self):
+        from main import create_app
+        from fastapi.testclient import TestClient
+
+        app = create_app()
+        client = TestClient(app)
+        response = client.delete("/memory/short_term")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "cleared")
+
+
+# ── Orchestrator plan parsing ─────────────────────────────────────────────────
+
+class TestOrchestratorPlanParsing(unittest.TestCase):
+    def test_strip_markdown_fences(self):
+        """The orchestrator's _plan method must strip ```json ... ``` fences correctly."""
+        import re
+
+        def strip_fences(raw: str) -> str:
+            raw = raw.strip()
+            raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.IGNORECASE)
+            raw = re.sub(r"\s*```$", "", raw)
+            return raw
+
+        cases = [
+            ('```json\n[{"agent":"CoreAgent"}]\n```', '[{"agent":"CoreAgent"}]'),
+            ('```\n[{"agent":"CoreAgent"}]\n```', '[{"agent":"CoreAgent"}]'),
+            ('[{"agent":"CoreAgent"}]', '[{"agent":"CoreAgent"}]'),
+        ]
+        for raw, expected in cases:
+            self.assertEqual(strip_fences(raw).strip(), expected)
+
+
+# ── Code block extraction ─────────────────────────────────────────────────────
+
+class TestCodeBlockExtraction(unittest.TestCase):
+    def setUp(self):
+        from coding.engine import CodingEngine
+        self.engine = CodingEngine.__new__(CodingEngine)
+
+    def test_extract_with_newline(self):
+        text = "```python\nprint('hi')\n```"
+        blocks = self.engine._extract_blocks(text)
+        self.assertEqual(len(blocks), 1)
+        self.assertIn("print('hi')", blocks[0])
+
+    def test_extract_without_lang(self):
+        text = "```\nsome code\n```"
+        blocks = self.engine._extract_blocks(text)
+        self.assertEqual(len(blocks), 1)
+
+    def test_extract_multiple_blocks(self):
+        text = "```python\ncode1\n```\nsome text\n```javascript\ncode2\n```"
+        blocks = self.engine._extract_blocks(text)
+        self.assertEqual(len(blocks), 2)
 
 
 if __name__ == "__main__":
