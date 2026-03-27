@@ -90,7 +90,7 @@ def create_router() -> APIRouter:
     router = APIRouter()
 
     # ── / ─────────────────────────────────────────────────────────────────
-    @router.get("/", tags=["system"])
+    @router.get("/api/status", tags=["system"])
     async def system_status(request: Request) -> Dict[str, Any]:
         """WISPR AI OS — system health and info."""
         plugins: PluginManager = request.app.state.plugins

@@ -5,17 +5,22 @@ from __future__ import annotations
 import logging
 import sys
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import AsyncIterator
 
 import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from agents.orchestrator import OrchestratorAgent
 from api.routes import create_router
 from config import get_settings
 from memory.manager import MemoryManager
 from plugins.plugin_manager import PluginManager
+
+_STATIC_DIR = Path(__file__).parent / "static"
 
 settings = get_settings()
 
@@ -76,6 +81,15 @@ def create_app() -> FastAPI:
 
     # ── Routes ────────────────────────────────────────────────────────────
     app.include_router(create_router())
+
+    # ── Static files (UI) ─────────────────────────────────────────────────
+    if _STATIC_DIR.exists():
+        app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
+
+    # ── UI root ───────────────────────────────────────────────────────────
+    @app.get("/", include_in_schema=False)
+    async def serve_ui() -> FileResponse:
+        return FileResponse(str(_STATIC_DIR / "index.html"))
 
     return app
 
