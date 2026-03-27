@@ -430,6 +430,49 @@ def create_router() -> APIRouter:
             raise HTTPException(404, f"Key '{key}' not found in long-term memory.")
         return {"key": key, "value": value}
 
+    @router.get("/memory/search", tags=["memory"])
+    async def memory_search(
+        q: str,
+        top_k: int = 5,
+        memory: MemoryManager = Depends(_get_memory),
+    ) -> Dict[str, Any]:
+        """Search long-term memory by keyword."""
+        if not q.strip():
+            raise HTTPException(400, "Search query 'q' must not be empty.")
+        results = memory.long_term.search(q, top_k=top_k)
+        return {"query": q, "num_results": len(results), "results": results}
+
+    @router.get("/memory/short_term", tags=["memory"])
+    async def memory_short_term(
+        n: int = 10,
+        memory: MemoryManager = Depends(_get_memory),
+    ) -> Dict[str, Any]:
+        """Return the most recent short-term (session) memory entries."""
+        entries = memory.short_term.get_recent(n=n)
+        return {
+            "total_entries": len(memory.short_term),
+            "returned": len(entries),
+            "messages": [{"role": e.role, "content": e.content, "timestamp": e.timestamp} for e in entries],
+        }
+
+    @router.delete("/memory/short_term", tags=["memory"])
+    async def memory_clear_short_term(
+        memory: MemoryManager = Depends(_get_memory),
+    ) -> Dict[str, str]:
+        """Clear all short-term (session) memory entries."""
+        memory.short_term.clear()
+        return {"status": "cleared"}
+
+    @router.delete("/memory/{key}", tags=["memory"])
+    async def memory_delete(
+        key: str,
+        memory: MemoryManager = Depends(_get_memory),
+    ) -> Dict[str, Any]:
+        """Delete a key from long-term memory."""
+        deleted = memory.long_term.delete(key)
+        if not deleted:
+            raise HTTPException(404, f"Key '{key}' not found in long-term memory.")
+        return {"status": "deleted", "key": key}
     # ── /sessions ─────────────────────────────────────────────────────────
     @router.delete("/sessions/{session_id}", tags=["memory"])
     async def clear_session(

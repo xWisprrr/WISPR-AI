@@ -59,5 +59,5 @@ class CoderAgent(BaseAgent):
     @staticmethod
     def _extract_code_blocks(text: str) -> List[str]:
         """Extract fenced code block contents from a markdown response."""
-        pattern = r"```(?:\w+)?\n(.*?)```"
+        pattern = r"```(?:\w+)?\n?(.*?)```"
         return re.findall(pattern, text, flags=re.DOTALL)

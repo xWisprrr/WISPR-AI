@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from typing import Any, Dict, List, Optional
 
 from agents.base_agent import AgentResult, BaseAgent
@@ -167,16 +168,16 @@ class OrchestratorAgent:
         }
 
     async def _plan(self, task: str, context: Dict[str, Any]) -> List[Dict[str, Any]]:
-        import json
-
         messages = [
             {"role": "system", "content": _PLAN_PROMPT},
             {"role": "user", "content": f"Task: {task}\nContext: {context}"},
         ]
         try:
             raw = await self.llm.complete(messages, task_type=TaskType.REASONING)
-            # Strip any accidental markdown fences
-            raw = raw.strip().lstrip("```json").lstrip("```").rstrip("```").strip()
+            # Strip markdown code fences (```json ... ``` or ``` ... ```)
+            raw = raw.strip()
+            raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.IGNORECASE)
+            raw = re.sub(r"\s*```$", "", raw)
             return json.loads(raw)
         except Exception as exc:
             logger.warning("Plan generation failed (%s); using single CoreAgent.", exc)
