@@ -195,7 +195,157 @@ class TestAgentResult(unittest.TestCase):
         self.assertEqual(r.error, "boom")
 
 
-# ── Plugin Manager ────────────────────────────────────────────────────────────
+# ── Complexity Classification ─────────────────────────────────────────────────
+
+class TestComplexityClassification(unittest.TestCase):
+    """Tests for OrchestratorAgent._classify_complexity and simple/complex routing."""
+
+    def _make_orchestrator(self, llm_response: str):
+        """Build an OrchestratorAgent whose LLM always returns *llm_response*."""
+        from agents.orchestrator import OrchestratorAgent
+        from memory.manager import MemoryManager
+
+        memory = MemoryManager()
+        orch = OrchestratorAgent.__new__(OrchestratorAgent)
+        orch.memory = memory
+
+        mock_llm = MagicMock()
+        mock_llm.complete = AsyncMock(return_value=llm_response)
+        orch.llm = mock_llm
+        return orch
+
+    def test_classify_simple(self):
+        orch = self._make_orchestrator("SIMPLE")
+        result = asyncio.get_event_loop().run_until_complete(
+            orch._classify_complexity("What is 2 + 2?")
+        )
+        self.assertEqual(result, "simple")
+
+    def test_classify_complex(self):
+        orch = self._make_orchestrator("COMPLEX")
+        result = asyncio.get_event_loop().run_until_complete(
+            orch._classify_complexity("Build a full-stack web app with authentication.")
+        )
+        self.assertEqual(result, "complex")
+
+    def test_classify_defaults_to_complex_on_llm_error(self):
+        from agents.orchestrator import OrchestratorAgent
+        from memory.manager import MemoryManager
+
+        orch = OrchestratorAgent.__new__(OrchestratorAgent)
+        orch.memory = MemoryManager()
+
+        mock_llm = MagicMock()
+        mock_llm.complete = AsyncMock(side_effect=RuntimeError("LLM down"))
+        orch.llm = mock_llm
+
+        result = asyncio.get_event_loop().run_until_complete(
+            orch._classify_complexity("Hello!")
+        )
+        self.assertEqual(result, "complex")
+
+    def test_simple_task_returns_empty_plan(self):
+        """Simple tasks should bypass orchestration (plan == [])."""
+        from agents.orchestrator import OrchestratorAgent
+        from agents.base_agent import AgentResult
+        from memory.manager import MemoryManager
+
+        memory = MemoryManager()
+        orch = OrchestratorAgent.__new__(OrchestratorAgent)
+        orch.memory = memory
+
+        # LLM for classify returns SIMPLE; CoreAgent returns a short answer
+        mock_llm = MagicMock()
+        mock_llm.complete = AsyncMock(return_value="SIMPLE")
+        orch.llm = mock_llm
+        orch.reasoning = MagicMock()
+
+        mock_core = MagicMock()
+        mock_core.name = "CoreAgent"
+        mock_core.run = AsyncMock(
+            return_value=AgentResult(
+                success=True, output="Paris.", agent_name="CoreAgent", task_type="reasoning"
+            )
+        )
+        orch._agents = {"CoreAgent": mock_core}
+
+        result = asyncio.get_event_loop().run_until_complete(
+            orch.run("What is the capital of France?")
+        )
+        self.assertEqual(result["plan"], [])
+        self.assertEqual(result["final_answer"], "Paris.")
+
+    def test_simple_task_passes_concise_context(self):
+        """CoreAgent must receive response_style=concise for simple tasks."""
+        from agents.orchestrator import OrchestratorAgent
+        from agents.base_agent import AgentResult
+        from memory.manager import MemoryManager
+
+        memory = MemoryManager()
+        orch = OrchestratorAgent.__new__(OrchestratorAgent)
+        orch.memory = memory
+
+        mock_llm = MagicMock()
+        mock_llm.complete = AsyncMock(return_value="SIMPLE")
+        orch.llm = mock_llm
+        orch.reasoning = MagicMock()
+
+        captured_context: list = []
+
+        async def capture_run(task, context=None):
+            captured_context.append(context)
+            return AgentResult(
+                success=True, output="42.", agent_name="CoreAgent", task_type="reasoning"
+            )
+
+        mock_core = MagicMock()
+        mock_core.name = "CoreAgent"
+        mock_core.run = capture_run
+        orch._agents = {"CoreAgent": mock_core}
+
+        asyncio.get_event_loop().run_until_complete(
+            orch.run("What is 6 times 7?")
+        )
+        self.assertTrue(len(captured_context) > 0)
+        self.assertEqual(captured_context[0].get("response_style"), "concise")
+
+
+# ── CoreAgent concise mode ────────────────────────────────────────────────────
+
+class TestCoreAgentConciseMode(unittest.TestCase):
+    """CoreAgent should use the concise system prompt when response_style=concise."""
+
+    def _make_core_agent(self, llm_response: str):
+        from agents.core_agent import CoreAgent
+        from memory.manager import MemoryManager
+
+        memory = MemoryManager()
+        mock_llm = MagicMock()
+        mock_llm.complete = AsyncMock(return_value=llm_response)
+        return CoreAgent(llm_router=mock_llm, memory=memory)
+
+    def test_concise_mode_uses_concise_prompt(self):
+        agent = self._make_core_agent("Yes.")
+        asyncio.get_event_loop().run_until_complete(
+            agent.run("Is the sky blue?", context={"response_style": "concise"})
+        )
+        # Verify the concise system prompt was used (check for its key instruction)
+        call_args = agent.llm.complete.call_args
+        messages = call_args[0][0]
+        self.assertIn("concisely", messages[0]["content"].lower())
+        self.assertIn("one or two sentences", messages[0]["content"].lower())
+
+    def test_normal_mode_uses_default_prompt(self):
+        agent = self._make_core_agent("The sky is blue because of Rayleigh scattering.")
+        asyncio.get_event_loop().run_until_complete(
+            agent.run("Why is the sky blue?")
+        )
+        call_args = agent.llm.complete.call_args
+        messages = call_args[0][0]
+        # Default prompt emphasises structured reasoning, not conciseness
+        self.assertIn("reasoning", messages[0]["content"].lower())
+        self.assertNotIn("one or two sentences", messages[0]["content"].lower())
+
 
 class TestPluginManager(unittest.TestCase):
     def setUp(self):
