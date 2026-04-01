@@ -19,3 +19,11 @@ memory/store/
 .mypy_cache/
 htmlcov/
 .coverage
+
+# Desktop app (Tauri + React)
+desktop/node_modules/
+desktop/dist/
+desktop/src-tauri/target/
+
+# Xencode workspace artifacts
+coding/store/xencode/

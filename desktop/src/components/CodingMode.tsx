@@ -259,7 +259,7 @@ export default function CodingMode() {
         body: JSON.stringify({
           repo_name: publishRepoName.trim(),
           private: publishPrivate,
-          source_dir: xcResult.output_dir,
+          workspace: xcResult.output_dir,
         }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
