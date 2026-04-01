@@ -540,7 +540,7 @@ cd desktop
 npm run tauri build
 ```
 
-The signed installer (`WISPR-Desktop-Studio_x.y.z_x64-setup.exe`) is emitted to `desktop/src-tauri/target/release/bundle/`.
+The installer (`WISPR-Desktop-Studio_x.y.z_x64-setup.exe`) is emitted to `desktop/src-tauri/target/release/bundle/`.
 
 ### Screenshot
 
@@ -594,7 +594,7 @@ The default target language is **Python**. Xencode auto-detects the language fro
 | `javascript` | `javascript`, `node`, `npm`, `react`, `vue`, `express` |
 | `typescript` | `typescript`, `angular`, `tsx`, ` ts ` |
 | `go` | `golang`, `goroutine`, `.go`, `go ` |
-| `rust` | `rust`, `.rs`, `crate` |
+| `rust` | `rust`, `.rs`, `cargo`, `crate` |
 | `cpp` | `c++`, `cpp`, `#include <iostream>` |
 | `csharp` | `c#`, `csharp`, `.net`, `dotnet` |
 

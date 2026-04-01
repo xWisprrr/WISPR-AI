@@ -237,7 +237,7 @@ class TestSpecParserHeuristic(unittest.TestCase):
     def test_detect_rust_from_prompt(self):
         from coding.xencode.spec_parser import SpecParser
         parser = self._make_parser()
-        # "cargo" contains "go " so we rely on ".rs" and "rust" keywords instead
+        # Detects Rust via '.rs' and 'rust' keywords in the prompt
         spec = parser._parse_heuristic(
             "Write a Rust CLI tool — compile with `rustc` and use .rs source files", "rust-cli", "python"
         )
@@ -495,7 +495,8 @@ class TestFinalizer(unittest.TestCase):
 
     def test_repair_skipped_when_no_llm(self):
         """When llm=None and build fails, _attempt_repair returns False immediately.
-        The loop increments repair_attempts once before breaking, so we expect 1."""
+        repair_attempts is incremented (in finalizer.py) before _attempt_repair is
+        called, so after the early break it equals 1 even though no repair was applied."""
         from coding.xencode.finalizer import Finalizer
         ws = Path(self._tmp, "ws6")
         ws.mkdir()
