@@ -91,6 +91,13 @@ class Settings(BaseSettings):
     # Unrestricted filesystem access — set to True to enable deny-list warnings in logs
     code_engine_fs_warn_unrestricted: bool = True
 
+    # ── Xencode ───────────────────────────────────────────────────────────
+    xencode_workspace_root: str = "coding/store/xencode"
+    xencode_artifacts_dir: str = "coding/store/xencode/artifacts"
+    xencode_max_repair_attempts: int = 2
+    xencode_restrict_to_workspace: bool = True
+    xencode_build_timeout: int = 120
+
     # ── CORS ──────────────────────────────────────────────────────────────
     cors_origins: List[str] = ["*"]
 
