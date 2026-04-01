@@ -790,6 +790,194 @@ def create_router() -> APIRouter:
         """List all supported deployment providers."""
         return {"providers": SUPPORTED_PROVIDERS}
 
+    # ── Xencode ───────────────────────────────────────────────────────────
+
+    class XencodeCompileRequestModel(BaseModel):
+        prompt: str = Field(..., description="Project description or README content")
+        project_name: str = Field(..., description="Project name (used as workspace dirname)")
+        language: str = Field(default="python", description="Target language")
+        workspace: Optional[str] = Field(default=None, description="Override workspace path")
+        build_command: Optional[str] = Field(default=None, description="Override build command")
+
+    class GitHubPublishRequestModel(BaseModel):
+        workspace: str = Field(..., description="Absolute path to workspace to publish")
+        repo_name: str = Field(..., description="GitHub repository name to create")
+        private: bool = Field(default=False, description="Make repo private")
+        description: str = Field(default="", description="Repository description")
+
+    @router.post("/code-engine/xencode/compile", tags=["xencode"])
+    async def xencode_compile(body: XencodeCompileRequestModel) -> Dict[str, Any]:
+        """Run the full Xencode pipeline: parse spec → plan → write → validate → build → ZIP."""
+        from coding.xencode.engine import XencodeEngine
+        from coding.xencode.schemas import XencodeCompileRequest
+
+        engine = XencodeEngine(llm_router=_get_code_engine().llm)
+        request = XencodeCompileRequest(
+            prompt=body.prompt,
+            project_name=body.project_name,
+            language=body.language,
+            workspace=body.workspace,
+            build_command=body.build_command,
+        )
+        result = await engine.compile(request)
+        if not result.success and result.error:
+            logger.error("Xencode compile failed for %s", body.project_name)
+            raise HTTPException(500, "Xencode compile failed. Check server logs for details.")
+        return result.model_dump()
+
+    @router.post("/code-engine/xencode/compile/stream", tags=["xencode"])
+    async def xencode_compile_stream(body: XencodeCompileRequestModel) -> StreamingResponse:
+        """Stream the Xencode pipeline via Server-Sent Events.
+
+        Events: spec_parsed, plan, files_written, validation,
+                final_build_started, final_build_output, done, error
+        """
+        from coding.xencode.engine import XencodeEngine
+        from coding.xencode.schemas import XencodeCompileRequest
+
+        engine = XencodeEngine(llm_router=_get_code_engine().llm)
+        request = XencodeCompileRequest(
+            prompt=body.prompt,
+            project_name=body.project_name,
+            language=body.language,
+            workspace=body.workspace,
+            build_command=body.build_command,
+        )
+
+        async def event_generator() -> AsyncIterator[str]:
+            try:
+                async for event in engine.stream_compile(request):
+                    payload = json.dumps(event)
+                    yield f"data: {payload}\n\n"
+            except Exception:
+                logger.exception("Xencode stream_compile generator error")
+                yield f"data: {json.dumps({'event': 'error', 'data': {'error': 'Internal stream error'}})}\n\n"
+
+        return StreamingResponse(
+            event_generator(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    @router.post("/code-engine/github/create-and-publish", tags=["xencode"])
+    async def github_create_and_publish(body: GitHubPublishRequestModel) -> Dict[str, Any]:
+        """Create a GitHub repository and push the workspace using the gh CLI.
+
+        Requires the ``gh`` CLI to be installed and authenticated (``gh auth login``).
+        """
+        import re as _re
+        import subprocess
+        import urllib.parse
+        from pathlib import Path
+
+        # Validate repo_name — GitHub only allows alphanumerics, hyphens, and underscores
+        if not _re.fullmatch(r"[A-Za-z0-9_.-]{1,100}", body.repo_name):
+            raise HTTPException(
+                400,
+                "repo_name may only contain letters, digits, hyphens, underscores, "
+                "and dots (max 100 characters).",
+            )
+
+        # Validate and resolve workspace path to prevent path traversal
+        try:
+            from coding.tools.file_tools import _safe_resolve
+            workspace = _safe_resolve(body.workspace)
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc))
+        except Exception:
+            raise HTTPException(400, "Invalid workspace path.")
+
+        if not workspace.exists() or not workspace.is_dir():
+            raise HTTPException(400, f"Workspace does not exist: {body.workspace}")
+
+        # Check gh CLI is available
+        try:
+            auth_check = subprocess.run(
+                ["gh", "auth", "status"],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            if auth_check.returncode != 0:
+                return {
+                    "success": False,
+                    "error": (
+                        "gh CLI is not authenticated. Run 'gh auth login' first."
+                    ),
+                }
+        except FileNotFoundError:
+            return {
+                "success": False,
+                "error": (
+                    "gh CLI not found. Install it from https://cli.github.com/ "
+                    "and run 'gh auth login'."
+                ),
+            }
+        except subprocess.TimeoutExpired:
+            return {"success": False, "error": "gh auth check timed out."}
+
+        # Initialise git repo if not already one
+        git_dir = workspace / ".git"
+        if not git_dir.exists():
+            subprocess.run(["git", "init"], cwd=str(workspace), capture_output=True)
+            subprocess.run(
+                ["git", "add", "-A"], cwd=str(workspace), capture_output=True
+            )
+            subprocess.run(
+                ["git", "commit", "-m", "Initial commit via WISPR Xencode"],
+                cwd=str(workspace),
+                capture_output=True,
+            )
+
+        # Build gh repo create command (list form — no shell injection risk)
+        # repo_name has already been validated against a strict alphanumeric regex above
+        safe_repo_name = str(body.repo_name)  # validated: [A-Za-z0-9_.-]{1,100}
+        cmd = [
+            "gh", "repo", "create", safe_repo_name,
+            "--source", str(workspace),
+            "--push",
+            "--description", body.description or "Created by WISPR Xencode",
+        ]
+        if body.private:
+            cmd.append("--private")
+        else:
+            cmd.append("--public")
+
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=60,
+                cwd=str(workspace),
+            )
+            if proc.returncode == 0:
+                output = proc.stdout.strip() or proc.stderr.strip()
+                # Extract repo URL: validate that netloc is exactly github.com or a subdomain
+                repo_url: Optional[str] = None
+                for line in output.splitlines():
+                    parsed = urllib.parse.urlparse(line.strip())
+                    netloc = parsed.netloc.lower()
+                    if parsed.scheme in ("https", "http") and (
+                        netloc == "github.com" or netloc.endswith(".github.com")
+                    ):
+                        repo_url = line.strip()
+                        break
+                return {
+                    "success": True,
+                    "repo_url": repo_url,
+                    "message": output,
+                }
+            return {
+                "success": False,
+                "error": "Repository creation failed. Check gh CLI output.",
+            }
+        except subprocess.TimeoutExpired:
+            return {"success": False, "error": "gh repo create timed out after 60s."}
+        except Exception as exc:
+            logger.error("GitHub publish failed: %s", exc)
+            raise HTTPException(500, "GitHub publish failed. Check server logs.")
+
     # ── Modes info ────────────────────────────────────────────────────────
 
     @router.get("/code-engine/modes", tags=["code-engine"])

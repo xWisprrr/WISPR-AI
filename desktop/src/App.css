@@ -1,0 +1,81 @@
+/* App-level layout */
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+}
+
+.app-header {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 0 1.25rem;
+  height: 52px;
+  background: #1a1a2e;
+  border-bottom: 1px solid #2d2d4e;
+  flex-shrink: 0;
+}
+
+.app-logo {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  margin-right: 1rem;
+}
+
+.logo-text {
+  font-size: 1.2rem;
+  font-weight: 700;
+  color: #7c6af7;
+  letter-spacing: 0.1em;
+}
+
+.logo-sub {
+  font-size: 0.75rem;
+  color: #888;
+}
+
+.tab-bar {
+  display: flex;
+  gap: 4px;
+}
+
+.tab-btn {
+  padding: 6px 18px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: #aaa;
+  font-size: 0.875rem;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.tab-btn:hover {
+  background: #252540;
+  color: #ddd;
+}
+
+.tab-btn.active {
+  background: #252550;
+  border-color: #7c6af7;
+  color: #fff;
+}
+
+.backend-indicator {
+  margin-left: auto;
+}
+
+.backend-url {
+  font-size: 0.75rem;
+  color: #555;
+  font-family: monospace;
+}
+
+.app-main {
+  flex: 1;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
