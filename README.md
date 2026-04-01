@@ -305,6 +305,212 @@ python -m pytest tests/ -v
 
 ---
 
+---
+
+## 🤖 Code Engine
+
+> **The agentic engineering core of WISPR AI OS** — specialized for advanced coding with real-time file operations, seamless deployment integrations, and unlimited prompting.
+
+### Overview
+
+The Code Engine lives under `coding/` and provides five intelligent agent modes, persistent sessions, a real-time filesystem toolkit, and one-click deployment to five cloud providers.
+
+| Feature | Detail |
+|---|---|
+| **5 Agent Modes** | Ask · Architect · Code · Debug · Orchestrator |
+| **Unlimited Prompting** | No rate limits of any kind |
+| **Real-time File Ops** | Read · Write · Create · Edit · Delete · Search · Move |
+| **Session Persistence** | JSONL-backed sessions survive restarts; resume anywhere |
+| **Parallel Agents** | Orchestrator delegates tasks and runs them in parallel |
+| **Auto Failure Recovery** | Code mode runs tests, feeds failures to Debug, retries up to N times |
+| **Deployment** | GitHub · Vercel · Netlify · Railway · Docker |
+| **Audit Log** | Every file operation is logged (who/when/session/op/path/bytes) |
+
+---
+
+### Agent Modes
+
+| Mode | Description | Can Write Files |
+|---|---|---|
+| **ask** | Q&A companion — expert answers, explanations, guidance | ❌ No |
+| **architect** | Analyses the codebase; produces architectures + step-by-step plans | ❌ No |
+| **code** | Transforms natural language into production-ready code, edits local files | ✅ Yes |
+| **debug** | Diagnoses bugs, identifies root causes, applies targeted fixes | ✅ Yes |
+| **orchestrator** | Decomposes complex tasks, delegates to specialist agents, runs in parallel | ✅ Yes |
+
+---
+
+### Running the API Server
+
+```bash
+# Start the WISPR AI API server (Code Engine routes included)
+python main.py serve
+# or simply
+python main.py
+
+# API is available at http://localhost:8000
+# Interactive docs: http://localhost:8000/docs
+```
+
+---
+
+### CLI Chat — Quick Start
+
+```bash
+# Start a new chat session in Ask mode (default)
+python main.py code-engine chat
+
+# Start in Code mode with a workspace
+python main.py code-engine chat --mode code --workspace /path/to/project
+
+# Resume an existing session
+python main.py code-engine chat --session <session-id>
+
+# List all sessions
+python main.py code-engine sessions
+
+# Deploy a project
+python main.py code-engine deploy vercel /path/to/project
+python main.py code-engine deploy docker /path/to/project
+python main.py code-engine deploy github /path/to/project
+
+# Show all CLI help
+python main.py code-engine help
+```
+
+**In-session commands:**
+
+```
+/mode ask|architect|code|debug|orchestrator   Switch agent mode
+/workspace /path/to/project                   Set the workspace root
+/sessions                                     List all sessions
+/quit                                         Exit
+```
+
+---
+
+### API Endpoints
+
+All Code Engine endpoints are under `/code-engine/` and visible at `/docs`.
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/code-engine/chat` | Send a message; get an agentic response |
+| `POST` | `/code-engine/chat/stream` | Stream response tokens via SSE |
+| `GET` | `/code-engine/sessions` | List all sessions |
+| `POST` | `/code-engine/sessions` | Create a new session |
+| `GET` | `/code-engine/sessions/{id}` | Get session details |
+| `DELETE` | `/code-engine/sessions/{id}` | Delete a session |
+| `POST` | `/code-engine/sessions/{id}/mode` | Switch mode |
+| `POST` | `/code-engine/sessions/{id}/workspace` | Set workspace |
+| `POST` | `/code-engine/files/read` | Read a local file |
+| `POST` | `/code-engine/files/write` | Write / create a local file |
+| `POST` | `/code-engine/files/edit` | Targeted find-and-replace edit |
+| `DELETE` | `/code-engine/files` | Delete a file |
+| `GET` | `/code-engine/files/list` | List directory contents |
+| `POST` | `/code-engine/files/search` | Search file contents |
+| `GET` | `/code-engine/audit` | View file operation audit log |
+| `POST` | `/code-engine/deploy` | Generate deployment config + instructions |
+| `GET` | `/code-engine/deploy/providers` | List supported providers |
+| `GET` | `/code-engine/modes` | Describe all 5 modes |
+
+**Example — Chat request:**
+
+```bash
+curl -X POST http://localhost:8000/code-engine/chat \
+  -H "Content-Type: application/json" \
+  -d '{
+    "message": "Create a FastAPI hello-world endpoint",
+    "mode": "code",
+    "workspace": "/home/user/myproject"
+  }'
+```
+
+**Example — Deploy to Vercel:**
+
+```bash
+curl -X POST http://localhost:8000/code-engine/deploy \
+  -H "Content-Type: application/json" \
+  -d '{"provider": "vercel", "project_path": "/home/user/myproject"}'
+```
+
+---
+
+### ⚠️ Security: Unrestricted Filesystem Access
+
+> **WARNING:** The Code Engine is configured for **unrestricted local filesystem access**.
+> This means the Code and Debug agents can read and write any file on your machine
+> that your user account has access to.
+
+**What is protected by default:**
+
+The following paths are always blocked, regardless of configuration:
+
+- `~/.ssh` (SSH keys)
+- `~/.gnupg` (GPG keys)
+- `~/.aws` (AWS credentials)
+- `~/.config/gcloud` (GCP credentials)
+- `/etc`, `/usr`, `/bin`, `/sbin`, `/lib`, `/boot`, `/proc`, `/sys`, `/dev` (Unix system dirs)
+- `/System`, `/Library`, `/private` (macOS system dirs)
+- `C:\Windows`, `C:\Program Files` (Windows system dirs)
+
+**Adding extra denied paths:**
+
+```bash
+# Unix / macOS
+export WISPR_DENIED_PATHS="/home/user/secrets:/home/user/.config/sensitive"
+
+# Windows
+set WISPR_DENIED_PATHS=C:\Users\user\secrets;C:\sensitive
+```
+
+**Audit log:**
+
+Every file operation is recorded in `coding/store/audit.jsonl`:
+
+```jsonl
+{"ts": "2026-03-27T22:00:00Z", "op": "create", "path": "/home/user/app/main.py", "session_id": "abc", "agent": "CodeAgent", "bytes": 512}
+```
+
+View recent operations:
+
+```bash
+curl http://localhost:8000/code-engine/audit
+```
+
+**Restricting to a workspace only:**
+
+The safest way to limit the Code Engine is to set a workspace root and instruct users to always provide it when chatting. All relative paths are resolved against the workspace, so agents will naturally stay within it.
+
+---
+
+### Deployment Integrations
+
+The Code Engine can generate complete deployment configurations for:
+
+| Provider | Files Generated | CLI Command |
+|---|---|---|
+| **GitHub** | `.github/workflows/ci.yml` | `python main.py code-engine deploy github <path>` |
+| **Vercel** | `vercel.json` | `python main.py code-engine deploy vercel <path>` |
+| **Netlify** | `netlify.toml` | `python main.py code-engine deploy netlify <path>` |
+| **Railway** | `railway.toml` + `Dockerfile` | `python main.py code-engine deploy railway <path>` |
+| **Docker** | `Dockerfile` + `docker-compose.yml` | `python main.py code-engine deploy docker <path>` |
+
+---
+
+### Session Persistence
+
+Sessions are stored in `coding/store/sessions.jsonl`. Each session records:
+- Conversation history
+- Active agent mode
+- Workspace root
+- Custom variables (project name, preferences, etc.)
+- Agent state snapshots
+
+Sessions survive server restarts and can be resumed by ID in both the CLI and API.
+
+---
+
 ## License
 
 MIT

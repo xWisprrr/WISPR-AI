@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 from typing import Any, AsyncIterator, Dict, List, Optional
 
@@ -13,7 +14,9 @@ from pydantic import BaseModel, Field
 
 from agents.orchestrator import OrchestratorAgent
 from agents.react_agent import ReActAgent
-from coding.engine import CodingEngine, SUPPORTED_LANGUAGES
+from coding.engine import CodingEngine, CodeEngine, SUPPORTED_LANGUAGES
+from coding.session.manager import VALID_MODES
+from coding.deployment import SUPPORTED_PROVIDERS
 from hallucination.reducer import HallucinationReducer
 from memory.manager import MemoryManager
 from plugins.plugin_manager import PluginManager
@@ -25,6 +28,19 @@ from llm.router import TaskType
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
+
+# Shared Code Engine singleton — thread-safe lazy initialisation
+_code_engine: Optional[CodeEngine] = None
+_code_engine_lock = threading.Lock()
+
+
+def _get_code_engine() -> CodeEngine:
+    global _code_engine
+    if _code_engine is None:
+        with _code_engine_lock:
+            if _code_engine is None:
+                _code_engine = CodeEngine()
+    return _code_engine
 
 
 # ── Dependency injection helpers ──────────────────────────────────────────────
@@ -523,6 +539,313 @@ def create_router() -> APIRouter:
         """Run multi-vote hallucination reduction on a query."""
         reducer = HallucinationReducer(llm_router=orchestrator.llm)
         return await reducer.vote(body.query)
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # Code Engine routes  /code-engine/*
+    # ═══════════════════════════════════════════════════════════════════════
+
+    # ── Request/Response models ───────────────────────────────────────────
+
+    class CodeEngineChatRequest(BaseModel):
+        message: str = Field(..., description="User message to the Code Engine")
+        session_id: Optional[str] = Field(default=None, description="Session ID to resume")
+        mode: Optional[str] = Field(
+            default=None,
+            description=f"Agent mode: {sorted(VALID_MODES)}. Overrides session mode for this turn.",
+        )
+        workspace: Optional[str] = Field(default=None, description="Absolute path to project root")
+        auto_test: bool = Field(default=False, description="Run tests after code changes (Code mode)")
+        test_command: Optional[str] = Field(default=None, description="Shell command to run tests")
+        parallel: bool = Field(default=True, description="Run orchestrator tasks in parallel")
+
+    class CodeEngineModeRequest(BaseModel):
+        session_id: str
+        mode: str = Field(..., description=f"New mode: {sorted(VALID_MODES)}")
+
+    class CodeEngineWorkspaceRequest(BaseModel):
+        session_id: str
+        workspace: str = Field(..., description="Absolute path to workspace root")
+
+    class CodeEngineDeployRequest(BaseModel):
+        provider: str = Field(..., description=f"Deployment provider: {SUPPORTED_PROVIDERS}")
+        project_path: str = Field(..., description="Absolute path to the project directory")
+        project_description: Optional[str] = None
+        config: Optional[Dict[str, Any]] = None
+
+    class CodeEngineFileReadRequest(BaseModel):
+        path: str
+        session_id: Optional[str] = None
+
+    class CodeEngineFileWriteRequest(BaseModel):
+        path: str
+        content: str
+        session_id: Optional[str] = None
+
+    class CodeEngineFileEditRequest(BaseModel):
+        path: str
+        old_str: str
+        new_str: str
+        session_id: Optional[str] = None
+
+    class CodeEngineSearchRequest(BaseModel):
+        directory: str
+        pattern: str
+        glob_pattern: str = "**/*"
+        max_matches: int = Field(default=100, ge=1, le=1000)
+        use_regex: bool = False
+        session_id: Optional[str] = None
+
+    # ── Chat ─────────────────────────────────────────────────────────────
+
+    @router.post("/code-engine/chat", tags=["code-engine"])
+    async def code_engine_chat(body: CodeEngineChatRequest) -> Dict[str, Any]:
+        """Send a message to the Code Engine and receive an agentic response.
+
+        Supports all 5 modes: ask, architect, code, debug, orchestrator.
+        Unlimited prompting — no rate limits.
+        """
+        engine = _get_code_engine()
+        try:
+            return await engine.chat(
+                body.message,
+                session_id=body.session_id,
+                mode=body.mode,
+                workspace=body.workspace,
+                auto_test=body.auto_test,
+                test_command=body.test_command,
+                parallel=body.parallel,
+            )
+        except Exception as exc:
+            raise HTTPException(500, f"Code Engine error: {exc}")
+
+    @router.post("/code-engine/chat/stream", tags=["code-engine"])
+    async def code_engine_chat_stream(body: CodeEngineChatRequest) -> StreamingResponse:
+        """Stream a Code Engine response token-by-token via Server-Sent Events."""
+        engine = _get_code_engine()
+
+        async def event_generator() -> AsyncIterator[str]:
+            try:
+                async for chunk in engine.stream_chat(
+                    body.message,
+                    session_id=body.session_id,
+                    mode=body.mode,
+                    workspace=body.workspace,
+                ):
+                    payload = json.dumps({"type": "token", "data": chunk})
+                    yield f"data: {payload}\n\n"
+            except Exception as exc:
+                yield f"data: {json.dumps({'type': 'error', 'data': str(exc)})}\n\n"
+                return
+            yield f"data: {json.dumps({'type': 'done'})}\n\n"
+
+        return StreamingResponse(
+            event_generator(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    # ── Sessions ──────────────────────────────────────────────────────────
+
+    @router.get("/code-engine/sessions", tags=["code-engine"])
+    async def code_engine_list_sessions() -> Dict[str, Any]:
+        """List all Code Engine sessions."""
+        engine = _get_code_engine()
+        return {"sessions": engine.sessions.list_all()}
+
+    @router.post("/code-engine/sessions", tags=["code-engine"])
+    async def code_engine_create_session(
+        mode: str = "ask",
+        workspace: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Create a new Code Engine session."""
+        if mode not in VALID_MODES:
+            raise HTTPException(400, f"Invalid mode '{mode}'. Valid: {sorted(VALID_MODES)}")
+        engine = _get_code_engine()
+        session = engine.sessions.create(mode=mode, workspace=workspace)
+        return session.to_dict()
+
+    @router.get("/code-engine/sessions/{session_id}", tags=["code-engine"])
+    async def code_engine_get_session(session_id: str) -> Dict[str, Any]:
+        """Get a Code Engine session by ID."""
+        engine = _get_code_engine()
+        session = engine.sessions.get(session_id)
+        if not session:
+            raise HTTPException(404, f"Session '{session_id}' not found.")
+        return session.to_dict()
+
+    @router.delete("/code-engine/sessions/{session_id}", tags=["code-engine"])
+    async def code_engine_delete_session(session_id: str) -> Dict[str, str]:
+        """Delete a Code Engine session."""
+        engine = _get_code_engine()
+        if not engine.sessions.delete(session_id):
+            raise HTTPException(404, f"Session '{session_id}' not found.")
+        return {"status": "deleted", "session_id": session_id}
+
+    @router.post("/code-engine/sessions/{session_id}/mode", tags=["code-engine"])
+    async def code_engine_set_mode(session_id: str, body: CodeEngineModeRequest) -> Dict[str, Any]:
+        """Switch the active agent mode for an existing session."""
+        engine = _get_code_engine()
+        session = engine.sessions.get(session_id)
+        if not session:
+            raise HTTPException(404, f"Session '{session_id}' not found.")
+        try:
+            session.set_mode(body.mode)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        engine.sessions.save(session)
+        return {"session_id": session_id, "mode": session.mode}
+
+    @router.post("/code-engine/sessions/{session_id}/workspace", tags=["code-engine"])
+    async def code_engine_set_workspace(
+        session_id: str, body: CodeEngineWorkspaceRequest
+    ) -> Dict[str, Any]:
+        """Set the workspace root for an existing session."""
+        engine = _get_code_engine()
+        session = engine.sessions.get(session_id)
+        if not session:
+            raise HTTPException(404, f"Session '{session_id}' not found.")
+        session.workspace = body.workspace
+        engine.sessions.save(session)
+        return {"session_id": session_id, "workspace": session.workspace}
+
+    # ── File tools ────────────────────────────────────────────────────────
+
+    @router.post("/code-engine/files/read", tags=["code-engine"])
+    async def code_engine_read_file(body: CodeEngineFileReadRequest) -> Dict[str, Any]:
+        """Read a local file. Unrestricted filesystem access with audit logging."""
+        from coding.tools.file_tools import FileTools
+        from coding.tools.audit_log import AuditLog
+        ft = FileTools(audit=_get_code_engine().audit, session_id=body.session_id)
+        return await ft.read_file(body.path)
+
+    @router.post("/code-engine/files/write", tags=["code-engine"])
+    async def code_engine_write_file(body: CodeEngineFileWriteRequest) -> Dict[str, Any]:
+        """Write (create or overwrite) a local file."""
+        from coding.tools.file_tools import FileTools
+        ft = FileTools(audit=_get_code_engine().audit, session_id=body.session_id)
+        return await ft.write_file(body.path, body.content)
+
+    @router.post("/code-engine/files/edit", tags=["code-engine"])
+    async def code_engine_edit_file(body: CodeEngineFileEditRequest) -> Dict[str, Any]:
+        """Apply a targeted find-and-replace edit to a local file."""
+        from coding.tools.file_tools import FileTools
+        ft = FileTools(audit=_get_code_engine().audit, session_id=body.session_id)
+        return await ft.edit_file(body.path, body.old_str, body.new_str)
+
+    @router.delete("/code-engine/files", tags=["code-engine"])
+    async def code_engine_delete_file(path: str, session_id: Optional[str] = None) -> Dict[str, Any]:
+        """Delete a local file."""
+        from coding.tools.file_tools import FileTools
+        ft = FileTools(audit=_get_code_engine().audit, session_id=session_id)
+        return await ft.delete_file(path)
+
+    @router.get("/code-engine/files/list", tags=["code-engine"])
+    async def code_engine_list_dir(path: str = ".", session_id: Optional[str] = None) -> Dict[str, Any]:
+        """List the contents of a directory."""
+        from coding.tools.file_tools import FileTools
+        ft = FileTools(audit=_get_code_engine().audit, session_id=session_id)
+        return await ft.list_dir(path)
+
+    @router.post("/code-engine/files/search", tags=["code-engine"])
+    async def code_engine_search_files(body: CodeEngineSearchRequest) -> Dict[str, Any]:
+        """Search for a pattern in files under a directory."""
+        from coding.tools.file_tools import FileTools
+        ft = FileTools(audit=_get_code_engine().audit, session_id=body.session_id)
+        return await ft.search_files(
+            body.directory,
+            body.pattern,
+            glob_pattern=body.glob_pattern,
+            max_matches=body.max_matches,
+            use_regex=body.use_regex,
+        )
+
+    @router.get("/code-engine/audit", tags=["code-engine"])
+    async def code_engine_audit_log(n: int = 50) -> Dict[str, Any]:
+        """Return the most recent file operation audit records."""
+        engine = _get_code_engine()
+        records = engine.audit.recent(n=n)
+        return {"count": len(records), "records": records}
+
+    # ── Deployment ────────────────────────────────────────────────────────
+
+    @router.post("/code-engine/deploy", tags=["code-engine"])
+    async def code_engine_deploy(body: CodeEngineDeployRequest) -> Dict[str, Any]:
+        """Generate deployment configuration files and instructions.
+
+        Supported providers: github, vercel, netlify, railway, docker.
+        """
+        engine = _get_code_engine()
+        result = await engine.deploy(
+            body.provider,
+            body.project_path,
+            project_description=body.project_description,
+            config=body.config,
+        )
+        if not result["success"]:
+            raise HTTPException(400, result.get("error", "Deployment generation failed."))
+        return result
+
+    @router.get("/code-engine/deploy/providers", tags=["code-engine"])
+    async def code_engine_deploy_providers() -> Dict[str, Any]:
+        """List all supported deployment providers."""
+        return {"providers": SUPPORTED_PROVIDERS}
+
+    # ── Modes info ────────────────────────────────────────────────────────
+
+    @router.get("/code-engine/modes", tags=["code-engine"])
+    async def code_engine_modes() -> Dict[str, Any]:
+        """Describe the 5 Code Engine agent modes."""
+        return {
+            "modes": [
+                {
+                    "name": "ask",
+                    "title": "Ask Mode",
+                    "description": (
+                        "Intelligent Q&A companion. Provides expert technical answers, "
+                        "explanations, and guidance. Does NOT modify any files."
+                    ),
+                    "can_write_files": False,
+                },
+                {
+                    "name": "architect",
+                    "title": "Architect Mode",
+                    "description": (
+                        "Analyses the codebase, designs robust system architectures, "
+                        "and produces detailed step-by-step implementation plans."
+                    ),
+                    "can_write_files": False,
+                },
+                {
+                    "name": "code",
+                    "title": "Code Mode",
+                    "description": (
+                        "Primary coding partner. Transforms natural language into "
+                        "production-ready code, creating and editing local files. "
+                        "Supports automatic failure recovery via test integration."
+                    ),
+                    "can_write_files": True,
+                },
+                {
+                    "name": "debug",
+                    "title": "Debug Mode",
+                    "description": (
+                        "Specialist troubleshooting expert. Systematically diagnoses "
+                        "issues, identifies root causes, and applies targeted fixes."
+                    ),
+                    "can_write_files": True,
+                },
+                {
+                    "name": "orchestrator",
+                    "title": "Orchestrator Mode",
+                    "description": (
+                        "Breaks complex projects into tasks, delegates to specialist "
+                        "agents, coordinates results. Supports parallel execution."
+                    ),
+                    "can_write_files": True,
+                },
+            ],
+            "note": "Unlimited prompting — no rate limits.",
+        }
 
     return router
 
