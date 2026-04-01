@@ -511,6 +511,179 @@ Sessions survive server restarts and can be resumed by ID in both the CLI and AP
 
 ---
 
+## 🖥️ Desktop App (WISPR Desktop Studio)
+
+WISPR Desktop Studio is a native **Windows desktop application** built with [Tauri](https://tauri.app/) (Rust back-end) + React (front-end). It provides a full GUI for the WISPR AI backend — chat, Xencode project compilation, GitHub publishing — all without needing a browser.
+
+### Prerequisites
+
+| Requirement | Version |
+|---|---|
+| Node.js | 18+ |
+| Rust toolchain | latest stable (`rustup update`) |
+| Python + WISPR backend | running on `http://localhost:8000` |
+
+### Running in development mode
+
+```bash
+cd desktop
+npm install
+npm run tauri dev
+```
+
+This starts the Vite dev server and the Tauri window simultaneously. Hot-reloading is enabled for both the React front-end and the Rust shell.
+
+### Building a distributable
+
+```bash
+cd desktop
+npm run tauri build
+```
+
+The signed installer (`WISPR-Desktop-Studio_x.y.z_x64-setup.exe`) is emitted to `desktop/src-tauri/target/release/bundle/`.
+
+### Screenshot
+
+> _Screenshot placeholder — replace with an actual screenshot once available._
+
+---
+
+## ⚙️ Xencode — Spec-Driven Project Compiler
+
+Xencode turns a plain-English project description into a **complete, runnable project** — source files, build configs, README, tests, and a ready-to-ship ZIP — without writing a single line of code yourself.
+
+### How it works
+
+The pipeline runs through **6 sequential stages**, each emitted as a Server-Sent Event when using the streaming endpoint:
+
+| Stage event | What happens |
+|---|---|
+| `spec_parsed` | Prompt is parsed (via LLM or heuristics) into a structured `XencodeSpec` |
+| `plan` | A `XencodePlan` is generated: list of files with paths + content |
+| `files_written` | All planned files are written to the workspace directory |
+| `validation` | Static checks run: entry point exists, syntax errors, missing configs |
+| `final_build_started` | The build command is executed (e.g. `pip install -r requirements.txt`) |
+| `done` | Manifest persisted; ZIP deliverable created |
+
+### API endpoints
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/code-engine/xencode/compile` | Run the full pipeline; returns `XencodeCompileResponse` |
+| `POST` | `/code-engine/xencode/stream` | Same pipeline but streams stage events via SSE |
+
+**Example — compile request:**
+
+```bash
+curl -X POST http://localhost:8000/code-engine/xencode/compile \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "A FastAPI REST API with SQLite and pytest tests",
+    "project_name": "my-api",
+    "language": "python"
+  }'
+```
+
+### Language selection
+
+The default target language is **Python**. Xencode auto-detects the language from the prompt using keyword heuristics (no LLM required for detection). To override, set the `language` field:
+
+| Value | Detected keywords |
+|---|---|
+| `python` | `python`, `flask`, `fastapi`, `django`, `pytest`, `.py` |
+| `javascript` | `javascript`, `node`, `npm`, `react`, `vue`, `express` |
+| `typescript` | `typescript`, `angular`, `tsx`, ` ts ` |
+| `go` | `golang`, `goroutine`, `.go`, `go ` |
+| `rust` | `rust`, `.rs`, `crate` |
+| `cpp` | `c++`, `cpp`, `#include <iostream>` |
+| `csharp` | `c#`, `csharp`, `.net`, `dotnet` |
+
+### Output format
+
+```
+<workspace>/
+├── main.py          # (or language equivalent)
+├── requirements.txt
+├── README.md
+├── tests/
+│   └── test_main.py
+└── .xencode/
+    └── manifest.json   ← build metadata
+```
+
+A `<project-name>.zip` is written to the artifacts directory (configurable via `XENCODE_ARTIFACTS_DIR`).
+
+### Manifest format (`.xencode/manifest.json`)
+
+```json
+{
+  "project_name": "my-api",
+  "language": "python",
+  "workspace": "/xencode/workspaces/my-api",
+  "files_written": ["main.py", "requirements.txt", "README.md"],
+  "build_command": "pip install -r requirements.txt",
+  "build_success": true,
+  "build_output": "...",
+  "zip_path": "/xencode/artifacts/my-api.zip",
+  "validation_errors": [],
+  "repair_attempts": 0,
+  "created_at": "2025-01-01T00:00:00+00:00"
+}
+```
+
+### Environment variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `XENCODE_WORKSPACE_ROOT` | `xencode/workspaces` | Root directory for generated projects |
+| `XENCODE_ARTIFACTS_DIR` | `xencode/artifacts` | Where ZIP files are saved |
+| `XENCODE_BUILD_TIMEOUT` | `120` | Build command timeout in seconds |
+| `XENCODE_MAX_REPAIR_ATTEMPTS` | `2` | Max LLM-assisted build repair rounds |
+
+---
+
+## 🐙 GitHub Publishing
+
+Publish any local workspace (including Xencode output) directly to a new GitHub repository in one API call.
+
+### Endpoint
+
+```
+POST /code-engine/github/create-and-publish
+```
+
+**Request body:**
+
+```json
+{
+  "workspace": "/absolute/path/to/project",
+  "repo_name": "my-new-repo",
+  "private": false,
+  "description": "Created with WISPR AI Xencode"
+}
+```
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "repo_url": "https://github.com/<you>/my-new-repo",
+  "message": "Repository created and pushed successfully."
+}
+```
+
+### Prerequisites
+
+- The [GitHub CLI (`gh`)](https://cli.github.com/) must be installed and authenticated (`gh auth login`).
+- The workspace must be a valid directory; it will be `git init`-ed, committed, and pushed automatically.
+
+### From WISPR Desktop Studio
+
+After compiling a project with Xencode, click **"Publish to GitHub"** in the Desktop Studio sidebar. The app calls this endpoint automatically using the compiled workspace path.
+
+---
+
 ## License
 
 MIT
