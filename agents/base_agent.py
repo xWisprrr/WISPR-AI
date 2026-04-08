@@ -7,7 +7,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
-from llm.router import LLMRouter, TaskType
+from llm.router import LLMRouter, TaskType, get_router
 from memory.manager import MemoryManager
 
 logger = logging.getLogger(__name__)
@@ -37,7 +37,7 @@ class BaseAgent(ABC):
         llm_router: Optional[LLMRouter] = None,
         memory: Optional[MemoryManager] = None,
     ) -> None:
-        self.llm = llm_router or LLMRouter()
+        self.llm = llm_router or get_router()
         self.memory = memory or MemoryManager()
 
     @abstractmethod

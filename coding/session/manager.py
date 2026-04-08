@@ -56,9 +56,14 @@ class CodeSession:
         self.history.append({"role": role, "content": content})
         self.updated_at = datetime.now(timezone.utc).isoformat()
 
-    def as_messages(self) -> List[Dict[str, str]]:
-        """Return history in LLM-compatible format."""
-        return list(self.history)
+    def as_messages(self, max_turns: int = 20) -> List[Dict[str, str]]:
+        """Return history in LLM-compatible format.
+
+        Only the most recent ``max_turns`` *pairs* (user + assistant) are
+        returned to keep the context window and per-request token cost bounded.
+        A pair is 2 messages, so we keep the last ``max_turns * 2`` entries.
+        """
+        return list(self.history[-(max_turns * 2):])
 
     def clear_history(self) -> None:
         self.history = []
