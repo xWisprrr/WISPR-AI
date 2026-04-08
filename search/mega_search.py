@@ -23,6 +23,32 @@ settings = get_settings()
 
 _TIMEOUT = httpx.Timeout(settings.search_timeout)
 
+# ── Persistent shared HTTP client ─────────────────────────────────────────────
+# Reusing a single client allows TCP connections to be kept alive (keep-alive)
+# and connection-pool limits to be enforced, which is much cheaper than opening
+# a fresh TLS handshake for every search call.
+_http_client: Optional[httpx.AsyncClient] = None
+
+
+def _get_http_client() -> httpx.AsyncClient:
+    """Return the process-wide shared :class:`httpx.AsyncClient`.
+
+    The client is created lazily on the first call and reused thereafter.
+    It is intentionally not closed during normal operation; the OS will clean
+    it up on process exit.
+    """
+    global _http_client
+    if _http_client is None or _http_client.is_closed:
+        _http_client = httpx.AsyncClient(
+            follow_redirects=True,
+            limits=httpx.Limits(
+                max_connections=40,
+                max_keepalive_connections=20,
+                keepalive_expiry=30,
+            ),
+        )
+    return _http_client
+
 
 async def _searxng(query: str, client: httpx.AsyncClient, max_results: int) -> List[Dict]:
     """Query a SearXNG meta-search instance (covers many engines at once)."""
@@ -271,9 +297,9 @@ class MegaSearch:
         self, query: str, max_results: int = settings.search_max_sources
     ) -> List[Dict[str, Any]]:
         """Run all engines in parallel and return deduplicated results."""
-        async with httpx.AsyncClient(follow_redirects=True) as client:
-            tasks = [engine(query, client, self._per_engine) for engine in _ENGINES]
-            raw = await asyncio.gather(*tasks, return_exceptions=True)
+        client = _get_http_client()
+        tasks = [engine(query, client, self._per_engine) for engine in _ENGINES]
+        raw = await asyncio.gather(*tasks, return_exceptions=True)
 
         aggregated: List[Dict] = []
         for batch in raw:

@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
+import time
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple, Type
@@ -26,6 +28,70 @@ settings = get_settings()
 
 # Silence LiteLLM's verbose output unless debug is on
 litellm.set_verbose = settings.debug
+
+
+# ── Response cache ────────────────────────────────────────────────────────────
+
+class _ResponseCache:
+    """In-memory TTL cache for deterministic (temperature=0) LLM responses.
+
+    Keyed on a SHA-256 hash of (model, messages, max_tokens, temperature) so
+    identical requests are served instantly without an API round-trip.
+    """
+
+    def __init__(self, maxsize: int = 512, ttl: int = 3600) -> None:
+        self._cache: Dict[str, Tuple[str, float]] = {}
+        self._maxsize = maxsize
+        self._ttl = ttl
+
+    @staticmethod
+    def _make_key(
+        model: str,
+        messages: List[Dict[str, str]],
+        max_tokens: int,
+        temperature: float,
+    ) -> str:
+        payload = json.dumps(
+            {"m": model, "msgs": messages, "mt": max_tokens, "t": temperature},
+            sort_keys=True,
+            ensure_ascii=False,
+        )
+        return hashlib.sha256(payload.encode()).hexdigest()
+
+    def get(
+        self,
+        model: str,
+        messages: List[Dict[str, str]],
+        max_tokens: int,
+        temperature: float,
+    ) -> Optional[str]:
+        key = self._make_key(model, messages, max_tokens, temperature)
+        entry = self._cache.get(key)
+        if entry is None:
+            return None
+        value, expires_at = entry
+        if time.monotonic() < expires_at:
+            return value
+        del self._cache[key]
+        return None
+
+    def set(
+        self,
+        model: str,
+        messages: List[Dict[str, str]],
+        max_tokens: int,
+        temperature: float,
+        response: str,
+    ) -> None:
+        if len(self._cache) >= self._maxsize:
+            # Evict the soonest-to-expire entry
+            oldest_key = min(self._cache, key=lambda k: self._cache[k][1])
+            del self._cache[oldest_key]
+        key = self._make_key(model, messages, max_tokens, temperature)
+        self._cache[key] = (response, time.monotonic() + self._ttl)
+
+
+_response_cache = _ResponseCache()
 
 
 class TaskType(str, Enum):
@@ -236,6 +302,14 @@ class LLMRouter:
         temperature: float,
         **kwargs: Any,
     ) -> Tuple[str, LLMUsage]:
+        # Serve from cache for deterministic (temperature=0) calls when no
+        # extra kwargs are present (extra kwargs may change behaviour).
+        if temperature == 0.0 and not kwargs:
+            cached = _response_cache.get(model, messages, max_tokens, temperature)
+            if cached is not None:
+                logger.debug("LLM cache hit for model=%s", model)
+                return cached, LLMUsage()
+
         response = await litellm.acompletion(
             model=model,
             messages=messages,
@@ -249,7 +323,12 @@ class LLMRouter:
         self._total_usage.prompt_tokens += usage.prompt_tokens
         self._total_usage.completion_tokens += usage.completion_tokens
         self._total_usage.total_tokens += usage.total_tokens
-        return response.choices[0].message.content or "", usage
+        text = response.choices[0].message.content or ""
+
+        if temperature == 0.0 and not kwargs:
+            _response_cache.set(model, messages, max_tokens, temperature, text)
+
+        return text, usage
 
     @staticmethod
     def _configure_keys() -> None:
@@ -261,3 +340,21 @@ class LLMRouter:
             os.environ.setdefault("GEMINI_API_KEY", settings.gemini_api_key)
         if settings.groq_api_key:
             os.environ.setdefault("GROQ_API_KEY", settings.groq_api_key)
+
+
+# ── Singleton factory ─────────────────────────────────────────────────────────
+
+_router_instance: Optional[LLMRouter] = None
+
+
+def get_router() -> LLMRouter:
+    """Return the process-wide shared :class:`LLMRouter` instance.
+
+    All agents that don't receive an explicit router will share this singleton
+    so that token-usage statistics are accumulated in one place and there is no
+    unnecessary object creation overhead.
+    """
+    global _router_instance
+    if _router_instance is None:
+        _router_instance = LLMRouter()
+    return _router_instance

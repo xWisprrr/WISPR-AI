@@ -57,7 +57,9 @@ class TaskMemory:
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
         self._tasks[task_id]["steps"].append(step)
-        self._save()
+        # Deliberately not saving here to avoid one disk write per step.
+        # The task is persisted atomically when complete_task() or fail_task()
+        # is called.  Call flush() explicitly if an intermediate checkpoint is needed.
 
     def complete_task(self, task_id: str, final_result: Any) -> None:
         if task_id not in self._tasks:
@@ -82,6 +84,10 @@ class TaskMemory:
         tasks = list(self._tasks.values())
         tasks.sort(key=lambda t: t.get("created_at", ""), reverse=True)
         return tasks[:n]
+
+    def flush(self) -> None:
+        """Explicitly persist all in-memory task data to disk."""
+        self._save()
 
     # ── internals ─────────────────────────────────────────────────────────
 

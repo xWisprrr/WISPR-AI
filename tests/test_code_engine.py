@@ -32,6 +32,7 @@ sys.modules.setdefault("litellm", _llm_stub)
 _llm_router_stub = types.ModuleType("llm.router")
 _llm_router_stub.LLMRouter = MagicMock  # type: ignore[attr-defined]
 _llm_router_stub.TaskType = MagicMock()  # type: ignore[attr-defined]
+_llm_router_stub.get_router = MagicMock(return_value=MagicMock())  # type: ignore[attr-defined]
 sys.modules.setdefault("llm", types.ModuleType("llm"))
 sys.modules.setdefault("llm.router", _llm_router_stub)
 
