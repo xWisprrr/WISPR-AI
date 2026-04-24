@@ -288,7 +288,7 @@ _ENGINES = [
 
 
 class MegaSearch:
-    """Queries multiple search engines concurrently and deduplicates results."""
+    """Queries multiple search engines concurrently, deduplicates and ranks results."""
 
     def __init__(self, per_engine: int = settings.search_results_per_engine) -> None:
         self._per_engine = per_engine
@@ -296,7 +296,7 @@ class MegaSearch:
     async def search(
         self, query: str, max_results: int = settings.search_max_sources
     ) -> List[Dict[str, Any]]:
-        """Run all engines in parallel and return deduplicated results."""
+        """Run all engines in parallel and return deduplicated, ranked results."""
         client = _get_http_client()
         tasks = [engine(query, client, self._per_engine) for engine in _ENGINES]
         raw = await asyncio.gather(*tasks, return_exceptions=True)
@@ -306,7 +306,9 @@ class MegaSearch:
             if isinstance(batch, list):
                 aggregated.extend(batch)
 
-        return self._deduplicate(aggregated)[:max_results]
+        deduped = self._deduplicate(aggregated)
+        ranked = self._rank(deduped, query)
+        return ranked[:max_results]
 
     @staticmethod
     def _deduplicate(results: List[Dict]) -> List[Dict]:
@@ -318,3 +320,50 @@ class MegaSearch:
                 seen_urls.add(url)
                 deduped.append(r)
         return deduped
+
+    @staticmethod
+    def _rank(results: List[Dict], query: str) -> List[Dict]:
+        """Sort results by relevance + source quality score (highest first)."""
+        import re as _re
+        query_tokens = _re.findall(r"[a-z0-9]+", query.lower())
+        if not query_tokens:
+            return results
+        scored = [(r, _score_result(r, query_tokens)) for r in results]
+        scored.sort(key=lambda x: x[1], reverse=True)
+        return [r for r, _ in scored]
+
+
+# Source quality weights (higher = more trusted/curated)
+_SOURCE_WEIGHTS: Dict[str, float] = {
+    "searxng":      1.3,
+    "wikipedia":    1.4,
+    "arxiv":        1.3,
+    "stackoverflow": 1.2,
+    "github":       1.1,
+    "hackernews":   1.0,
+    "duckduckgo":   1.0,
+    "reddit":       0.8,
+}
+
+
+def _score_result(result: Dict[str, Any], query_tokens: List[str]) -> float:
+    """Return a relevance + quality score for a single search result.
+
+    Score = source_weight * (title_overlap + snippet_overlap)
+    where overlap counts how many query tokens appear in the field.
+    """
+    source = result.get("source", "")
+    weight = _SOURCE_WEIGHTS.get(source, 1.0)
+
+    title = result.get("title", "").lower()
+    snippet = result.get("snippet", "").lower()
+
+    title_hits = sum(1 for t in query_tokens if t in title)
+    snippet_hits = sum(1 for t in query_tokens if t in snippet)
+
+    # Snippet quality: prefer results with a non-trivial snippet
+    snippet_len_bonus = min(len(snippet) / 300, 1.0) * 0.5
+
+    return weight * (title_hits * 2 + snippet_hits + snippet_len_bonus)
+
+

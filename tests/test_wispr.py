@@ -938,5 +938,205 @@ class TestNewAPIEndpoints(unittest.TestCase):
         self.assertEqual(qr.session_id, "abc")
 
 
+
+# ── TF-IDF Memory Search ──────────────────────────────────────────────────────
+
+class TestLongTermMemoryTfIdf(unittest.TestCase):
+    def setUp(self):
+        import tempfile, os
+        self._tmp = tempfile.mkdtemp()
+        from memory.long_term import LongTermMemory
+        self.mem = LongTermMemory(db_path=os.path.join(self._tmp, "lt.json"))
+
+    def test_search_returns_relevant_results(self):
+        self.mem.store("python_intro", "Python is a high-level programming language")
+        self.mem.store("ml_basics", "Machine learning is a type of artificial intelligence")
+        self.mem.store("cat_facts", "Cats are carnivorous animals with retractable claws")
+
+        results = self.mem.search("python programming", top_k=2)
+        # The python entry should rank first
+        self.assertTrue(len(results) >= 1)
+        self.assertEqual(results[0]["key"], "python_intro")
+
+    def test_search_ranks_by_frequency(self):
+        # The entry with more keyword hits should rank higher
+        self.mem.store("deep_ml", "Machine learning machine learning neural networks")
+        self.mem.store("shallow_ml", "Machine learning overview")
+
+        results = self.mem.search("machine learning", top_k=3)
+        self.assertEqual(results[0]["key"], "deep_ml")
+
+    def test_search_empty_returns_nothing(self):
+        self.mem.store("k", "v")
+        results = self.mem.search("", top_k=5)
+        self.assertEqual(results, [])
+
+    def test_search_unknown_term_falls_back_to_substring(self):
+        self.mem.store("wispr_fact", "WISPR is an AI OS")
+        results = self.mem.search("wispr", top_k=5)
+        self.assertTrue(any(r["key"] == "wispr_fact" for r in results))
+
+
+# ── Calculator Plugin ─────────────────────────────────────────────────────────
+
+class TestCalculatorPlugin(unittest.TestCase):
+    def setUp(self):
+        from plugins.calculator_plugin import _evaluate_expression
+        self._eval = _evaluate_expression
+
+    def test_addition(self):
+        self.assertEqual(self._eval("2 + 2"), "4")
+
+    def test_multiplication(self):
+        self.assertEqual(self._eval("6 * 7"), "42")
+
+    def test_float_result(self):
+        self.assertAlmostEqual(float(self._eval("7 / 2")), 3.5)
+
+    def test_power(self):
+        self.assertEqual(self._eval("2 ** 10"), "1024")
+
+    def test_complex_expression(self):
+        self.assertEqual(self._eval("(10 + 5) * 2"), "30")
+
+    def test_sqrt_function(self):
+        self.assertEqual(self._eval("sqrt(144)"), "12")
+
+    def test_division_by_zero(self):
+        result = self._eval("1 / 0")
+        self.assertIn("Error", result)
+
+    def test_invalid_expression(self):
+        result = self._eval("import os")
+        self.assertIn("error", result.lower())
+
+    def test_disallowed_builtin(self):
+        result = self._eval("eval('1+1')")
+        self.assertIn("Error", result)
+
+    def test_plugin_register(self):
+        from plugins.calculator_plugin import register
+        plugin = register()
+        self.assertEqual(plugin.name, "Calculator")
+        self.assertEqual(plugin.version, "1.0.0")
+
+    def test_plugin_invoke(self):
+        from plugins.calculator_plugin import register
+        plugin = register()
+        result = asyncio.run(plugin.handler("100 + 23", {}))
+        self.assertEqual(result, "123")
+
+
+# ── TextStats Plugin ──────────────────────────────────────────────────────────
+
+class TestTextStatsPlugin(unittest.TestCase):
+    def test_basic_analysis(self):
+        from plugins.text_stats_plugin import _analyse
+        result = _analyse("the quick brown fox")
+        self.assertIn("Word count", result)
+        self.assertIn("4", result)
+
+    def test_empty_text(self):
+        from plugins.text_stats_plugin import _analyse
+        result = _analyse("")
+        self.assertIn("No words", result)
+
+    def test_top_n(self):
+        from plugins.text_stats_plugin import _analyse
+        result = _analyse("a a a b b c", top_n=2)
+        self.assertIn("'a'", result)
+
+    def test_plugin_register(self):
+        from plugins.text_stats_plugin import register
+        plugin = register()
+        self.assertEqual(plugin.name, "TextStats")
+
+    def test_plugin_invoke(self):
+        from plugins.text_stats_plugin import register
+        plugin = register()
+        result = asyncio.run(plugin.handler("hello world hello", {}))
+        self.assertIn("Word count", result)
+
+
+# ── Hallucination Reducer Cache ───────────────────────────────────────────────
+
+class TestHallucinationCache(unittest.TestCase):
+    def test_cache_hit(self):
+        from hallucination.reducer import _VerificationCache
+        cache = _VerificationCache(maxsize=10, ttl=3600)
+        result = {"supported": "yes", "confidence": 0.9, "explanation": "OK"}
+        cache.set("claim A", "evidence A", result)
+        cached = cache.get("claim A", "evidence A")
+        self.assertEqual(cached, result)
+
+    def test_cache_miss_different_claim(self):
+        from hallucination.reducer import _VerificationCache
+        cache = _VerificationCache(maxsize=10, ttl=3600)
+        cache.set("claim A", "evidence A", {"supported": "yes"})
+        self.assertIsNone(cache.get("claim B", "evidence A"))
+
+    def test_cache_ttl_expiry(self):
+        from hallucination.reducer import _VerificationCache
+        import time
+        cache = _VerificationCache(maxsize=10, ttl=0)  # Expires immediately
+        cache.set("claim", "evidence", {"supported": "yes"})
+        time.sleep(0.01)
+        self.assertIsNone(cache.get("claim", "evidence"))
+
+    def test_cache_maxsize_eviction(self):
+        from hallucination.reducer import _VerificationCache
+        cache = _VerificationCache(maxsize=3, ttl=3600)
+        for i in range(5):
+            cache.set(f"claim {i}", "ev", {"n": i})
+        # Should have evicted oldest and stored at most 3
+        self.assertLessEqual(len(cache._cache), 3)
+
+
+# ── Request-ID Middleware ─────────────────────────────────────────────────────
+
+class TestRequestIdMiddleware(unittest.TestCase):
+    def setUp(self):
+        from main import create_app
+        from fastapi.testclient import TestClient
+        self.client = TestClient(create_app())
+
+    def test_response_has_request_id_header(self):
+        response = self.client.get("/api/status")
+        self.assertIn("x-request-id", response.headers)
+        req_id = response.headers["x-request-id"]
+        self.assertTrue(len(req_id) > 0)
+
+    def test_client_request_id_is_echoed(self):
+        custom_id = "test-trace-abc-123"
+        response = self.client.get("/api/status", headers={"X-Request-ID": custom_id})
+        self.assertEqual(response.headers.get("x-request-id"), custom_id)
+
+
+# ── MegaSearch ranking ────────────────────────────────────────────────────────
+
+class TestMegaSearchRanking(unittest.TestCase):
+    def test_rank_puts_title_match_first(self):
+        from search.mega_search import MegaSearch
+        results = [
+            {"url": "https://a.com", "title": "Other stuff", "snippet": "nothing relevant", "source": "duckduckgo"},
+            {"url": "https://b.com", "title": "Python tutorial programming guide", "snippet": "Learn Python", "source": "wikipedia"},
+        ]
+        ranked = MegaSearch._rank(results, "python tutorial")
+        self.assertEqual(ranked[0]["url"], "https://b.com")
+
+    def test_rank_prefers_trusted_source(self):
+        from search.mega_search import MegaSearch
+        results = [
+            {"url": "https://r.com", "title": "python", "snippet": "", "source": "reddit"},
+            {"url": "https://w.com", "title": "python", "snippet": "", "source": "wikipedia"},
+        ]
+        ranked = MegaSearch._rank(results, "python")
+        self.assertEqual(ranked[0]["url"], "https://w.com")
+
+    def test_rank_empty_returns_empty(self):
+        from search.mega_search import MegaSearch
+        self.assertEqual(MegaSearch._rank([], "query"), [])
+
+
 if __name__ == "__main__":
     unittest.main()
