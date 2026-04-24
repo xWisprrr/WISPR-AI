@@ -1825,7 +1825,10 @@ function appendMsg(role, html) {
 
 function copyMsgText(btn) {
   const bubble = btn.closest('.msg-bubble');
-  const text = bubble.innerText.replace(/Copy$/, '').trim();
+  // Clone the bubble, remove the copy button from the clone, then read text
+  const clone = bubble.cloneNode(true);
+  clone.querySelectorAll('.msg-copy-btn').forEach(el => el.remove());
+  const text = clone.textContent.trim();
   navigator.clipboard.writeText(text).then(() => {
     btn.textContent = 'Copied!';
     setTimeout(() => { btn.textContent = 'Copy'; }, 1500);

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import xml.etree.ElementTree as ET
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote_plus
@@ -324,8 +325,7 @@ class MegaSearch:
     @staticmethod
     def _rank(results: List[Dict], query: str) -> List[Dict]:
         """Sort results by relevance + source quality score (highest first)."""
-        import re as _re
-        query_tokens = _re.findall(r"[a-z0-9]+", query.lower())
+        query_tokens = re.findall(r"[a-z0-9]+", query.lower())
         if not query_tokens:
             return results
         scored = [(r, _score_result(r, query_tokens)) for r in results]

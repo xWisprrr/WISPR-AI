@@ -90,10 +90,12 @@ class StudioIDE:
         # Truncate oversized output to avoid unbounded memory usage
         for field in ("stdout", "stderr"):
             raw = result.get(field, "")
-            if len(raw.encode()) > _MAX_OUTPUT_BYTES:
+            raw_bytes = raw.encode("utf-8", errors="replace")
+            if len(raw_bytes) > _MAX_OUTPUT_BYTES:
                 cutoff = _MAX_OUTPUT_BYTES // 2
+                truncated = raw_bytes[:cutoff].decode("utf-8", errors="ignore")
                 result[field] = (
-                    raw[:cutoff]
+                    truncated
                     + f"\n\n[... output truncated after {cutoff} bytes ...]"
                 )
 
