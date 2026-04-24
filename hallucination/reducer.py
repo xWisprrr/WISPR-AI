@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
+import time
 from collections import Counter
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -33,13 +36,51 @@ Output the synthesised best answer as plain prose — no headers or meta-comment
 """
 
 
+class _VerificationCache:
+    """Simple TTL cache for claim verification results.
+
+    Keyed by a SHA-256 hash of (claim, truncated evidence) so identical
+    verification requests are served without an extra LLM call.
+    """
+
+    def __init__(self, maxsize: int = 256, ttl: int = 1800) -> None:
+        self._cache: Dict[str, Tuple[Dict[str, Any], float]] = {}
+        self._maxsize = maxsize
+        self._ttl = ttl
+
+    def _key(self, claim: str, evidence_summary: str) -> str:
+        payload = json.dumps({"c": claim, "e": evidence_summary}, sort_keys=True)
+        return hashlib.sha256(payload.encode()).hexdigest()
+
+    def get(self, claim: str, evidence_summary: str) -> Optional[Dict[str, Any]]:
+        key = self._key(claim, evidence_summary)
+        entry = self._cache.get(key)
+        if entry is None:
+            return None
+        result, expires_at = entry
+        if time.monotonic() < expires_at:
+            return result
+        del self._cache[key]
+        return None
+
+    def set(self, claim: str, evidence_summary: str, result: Dict[str, Any]) -> None:
+        if len(self._cache) >= self._maxsize:
+            oldest = min(self._cache, key=lambda k: self._cache[k][1])
+            del self._cache[oldest]
+        key = self._key(claim, evidence_summary)
+        self._cache[key] = (result, time.monotonic() + self._ttl)
+
+
+_verification_cache = _VerificationCache()
+
+
 class HallucinationReducer:
     """Reduces hallucinations via multi-agent voting and search verification."""
 
     def __init__(self, llm_router: Optional[LLMRouter] = None) -> None:
         self.llm = llm_router or LLMRouter()
 
-    # ── public API ────────────────────────────────────────────────────────
+    # -- public API -----------------------------------------------------------
 
     async def vote(self, question: str, num_votes: int = 3) -> Dict[str, Any]:
         """Sample the LLM multiple times and return the majority-voted answer."""
@@ -66,11 +107,24 @@ class HallucinationReducer:
         claim: str,
         search_results: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
-        """Verify a claim against actual search results."""
-        evidence = "\n".join(
+        """Verify a claim against actual search results.
+
+        Results are cached so identical (claim, evidence) pairs are not
+        re-verified with a fresh LLM call within the TTL window.
+        """
+        evidence_lines = [
             f"- [{r.get('source','?')}] {r.get('title','')}: {r.get('snippet','')}"
             for r in search_results[:10]
-        )
+        ]
+        evidence = "\n".join(evidence_lines)
+        # Use a truncated summary as the cache key to avoid huge keys
+        evidence_summary = evidence[:500]
+
+        cached = _verification_cache.get(claim, evidence_summary)
+        if cached is not None:
+            logger.debug("Verification cache hit for claim (len=%d)", len(claim))
+            return cached
+
         prompt = f"Claim: {claim}\n\nEvidence:\n{evidence}"
         messages = [
             {"role": "system", "content": _VERIFY_PROMPT},
@@ -81,7 +135,9 @@ class HallucinationReducer:
         except Exception as exc:
             return {"supported": "unknown", "confidence": 0.0, "explanation": str(exc)}
 
-        return self._parse_verify_response(raw)
+        result = self._parse_verify_response(raw)
+        _verification_cache.set(claim, evidence_summary, result)
+        return result
 
     async def cross_check(
         self,
@@ -98,7 +154,7 @@ class HallucinationReducer:
         confidence = await self._score_confidence("", best)
         return best, confidence
 
-    # ── internals ─────────────────────────────────────────────────────────
+    # -- internals ------------------------------------------------------------
 
     async def _single_sample(self, question: str) -> str:
         messages = [

@@ -5,12 +5,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncIterator, Optional
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -82,6 +83,19 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # ── Request-ID middleware ──────────────────────────────────────────────
+    @app.middleware("http")
+    async def request_id_middleware(request: Request, call_next) -> Response:
+        """Attach a unique X-Request-ID header to every response.
+
+        If the client already sends an X-Request-ID header, that value is
+        reused (useful for end-to-end tracing in distributed systems).
+        """
+        req_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+        response: Response = await call_next(request)
+        response.headers["X-Request-ID"] = req_id
+        return response
 
     # ── Routes ────────────────────────────────────────────────────────────
     app.include_router(create_router())

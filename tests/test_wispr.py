@@ -216,14 +216,14 @@ class TestComplexityClassification(unittest.TestCase):
 
     def test_classify_simple(self):
         orch = self._make_orchestrator("SIMPLE")
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             orch._classify_complexity("What is 2 + 2?")
         )
         self.assertEqual(result, "simple")
 
     def test_classify_complex(self):
         orch = self._make_orchestrator("COMPLEX")
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             orch._classify_complexity("Build a full-stack web app with authentication.")
         )
         self.assertEqual(result, "complex")
@@ -239,7 +239,7 @@ class TestComplexityClassification(unittest.TestCase):
         mock_llm.complete = AsyncMock(side_effect=RuntimeError("LLM down"))
         orch.llm = mock_llm
 
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             orch._classify_complexity("Hello!")
         )
         self.assertEqual(result, "complex")
@@ -269,7 +269,7 @@ class TestComplexityClassification(unittest.TestCase):
         )
         orch._agents = {"CoreAgent": mock_core}
 
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             orch.run("What is the capital of France?")
         )
         self.assertEqual(result["plan"], [])
@@ -303,7 +303,7 @@ class TestComplexityClassification(unittest.TestCase):
         mock_core.run = capture_run
         orch._agents = {"CoreAgent": mock_core}
 
-        asyncio.get_event_loop().run_until_complete(
+        asyncio.run(
             orch.run("What is 6 times 7?")
         )
         self.assertTrue(len(captured_context) > 0)
@@ -326,7 +326,7 @@ class TestCoreAgentConciseMode(unittest.TestCase):
 
     def test_concise_mode_uses_concise_prompt(self):
         agent = self._make_core_agent("Yes.")
-        asyncio.get_event_loop().run_until_complete(
+        asyncio.run(
             agent.run("Is the sky blue?", context={"response_style": "concise"})
         )
         # Verify the concise system prompt was used (check for its key instruction)
@@ -337,7 +337,7 @@ class TestCoreAgentConciseMode(unittest.TestCase):
 
     def test_normal_mode_uses_default_prompt(self):
         agent = self._make_core_agent("The sky is blue because of Rayleigh scattering.")
-        asyncio.get_event_loop().run_until_complete(
+        asyncio.run(
             agent.run("Why is the sky blue?")
         )
         call_args = agent.llm.complete.call_args
@@ -665,26 +665,50 @@ class TestCodeBlockExtraction(unittest.TestCase):
 # ── LLM Router — new features ─────────────────────────────────────────────────
 
 class TestLLMRouterUsage(unittest.TestCase):
+    """Tests for LLM router features.
+
+    These tests use a subprocess to avoid sys.modules contamination from other
+    test files (test_code_engine.py / test_xencode.py) that stub litellm.
+    """
+
+    def _run_in_subprocess(self, code: str) -> str:
+        """Run *code* in a clean Python subprocess and return stdout."""
+        import subprocess
+        proj_root = str(Path(__file__).parent.parent)
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            cwd=proj_root,
+            env={**os.environ, "PYTHONPATH": proj_root},
+            timeout=10,
+        )
+        return result.stdout.strip()
+
     def test_task_type_react_exists(self):
-        from llm.router import TaskType
-        self.assertIn("react", [t.value for t in TaskType])
+        out = self._run_in_subprocess(
+            "from llm.router import TaskType; "
+            "print('react' in [t.value for t in TaskType])"
+        )
+        self.assertEqual(out, "True")
 
     def test_llm_usage_zero_on_new_router(self):
-        from llm.router import LLMRouter
-        router = LLMRouter()
-        usage = router.get_total_usage()
-        self.assertIn("prompt_tokens", usage)
-        self.assertIn("completion_tokens", usage)
-        self.assertIn("total_tokens", usage)
-        self.assertEqual(usage["total_tokens"], 0)
+        out = self._run_in_subprocess(
+            "from llm.router import LLMRouter; "
+            "r = LLMRouter(); "
+            "u = r.get_total_usage(); "
+            "print(u['prompt_tokens'], u['completion_tokens'], u['total_tokens'])"
+        )
+        self.assertEqual(out, "0 0 0")
 
     def test_llm_usage_dataclass(self):
-        from llm.router import LLMUsage
-        u = LLMUsage(prompt_tokens=10, completion_tokens=20, total_tokens=30)
-        d = u.to_dict()
-        self.assertEqual(d["prompt_tokens"], 10)
-        self.assertEqual(d["completion_tokens"], 20)
-        self.assertEqual(d["total_tokens"], 30)
+        out = self._run_in_subprocess(
+            "from llm.router import LLMUsage; "
+            "u = LLMUsage(prompt_tokens=10, completion_tokens=20, total_tokens=30); "
+            "d = u.to_dict(); "
+            "print(d['prompt_tokens'], d['completion_tokens'], d['total_tokens'])"
+        )
+        self.assertEqual(out, "10 20 30")
 
 
 # ── Session Memory ────────────────────────────────────────────────────────────
@@ -796,7 +820,7 @@ class TestReActAgent(unittest.TestCase):
 
     def test_run_with_immediate_final_answer(self):
         agent = self._make_agent("Thought: Easy.\nFinal Answer: The answer is 4.")
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             agent.run("What is 2+2?")
         )
         self.assertTrue(result.success)
@@ -828,7 +852,7 @@ class TestReActAgent(unittest.TestCase):
         agent.llm.complete = mock_complete
 
         with patch.object(agent, "_tool_python", AsyncMock(return_value="4")) as mock_py:
-            result = asyncio.get_event_loop().run_until_complete(
+            result = asyncio.run(
                 agent.run("What is 2+2?")
             )
         self.assertTrue(result.success)
@@ -897,7 +921,7 @@ class TestNewAPIEndpoints(unittest.TestCase):
         self.assertEqual(data["session_id"], "test-session-xyz")
 
     def test_system_status_includes_react(self):
-        response = self.client.get("/")
+        response = self.client.get("/api/status")
         self.assertEqual(response.status_code, 200)
         data = response.json()
         self.assertIn("ReActAgent", data["agents"])
@@ -912,6 +936,206 @@ class TestNewAPIEndpoints(unittest.TestCase):
         from api.routes import QueryResponse
         qr = QueryResponse(answer="hi", session_id="abc")
         self.assertEqual(qr.session_id, "abc")
+
+
+
+# ── TF-IDF Memory Search ──────────────────────────────────────────────────────
+
+class TestLongTermMemoryTfIdf(unittest.TestCase):
+    def setUp(self):
+        import tempfile, os
+        self._tmp = tempfile.mkdtemp()
+        from memory.long_term import LongTermMemory
+        self.mem = LongTermMemory(db_path=os.path.join(self._tmp, "lt.json"))
+
+    def test_search_returns_relevant_results(self):
+        self.mem.store("python_intro", "Python is a high-level programming language")
+        self.mem.store("ml_basics", "Machine learning is a type of artificial intelligence")
+        self.mem.store("cat_facts", "Cats are carnivorous animals with retractable claws")
+
+        results = self.mem.search("python programming", top_k=2)
+        # The python entry should rank first
+        self.assertTrue(len(results) >= 1)
+        self.assertEqual(results[0]["key"], "python_intro")
+
+    def test_search_ranks_by_frequency(self):
+        # The entry with more keyword hits should rank higher
+        self.mem.store("deep_ml", "Machine learning machine learning neural networks")
+        self.mem.store("shallow_ml", "Machine learning overview")
+
+        results = self.mem.search("machine learning", top_k=3)
+        self.assertEqual(results[0]["key"], "deep_ml")
+
+    def test_search_empty_returns_nothing(self):
+        self.mem.store("k", "v")
+        results = self.mem.search("", top_k=5)
+        self.assertEqual(results, [])
+
+    def test_search_unknown_term_falls_back_to_substring(self):
+        self.mem.store("wispr_fact", "WISPR is an AI OS")
+        results = self.mem.search("wispr", top_k=5)
+        self.assertTrue(any(r["key"] == "wispr_fact" for r in results))
+
+
+# ── Calculator Plugin ─────────────────────────────────────────────────────────
+
+class TestCalculatorPlugin(unittest.TestCase):
+    def setUp(self):
+        from plugins.calculator_plugin import _evaluate_expression
+        self._eval = _evaluate_expression
+
+    def test_addition(self):
+        self.assertEqual(self._eval("2 + 2"), "4")
+
+    def test_multiplication(self):
+        self.assertEqual(self._eval("6 * 7"), "42")
+
+    def test_float_result(self):
+        self.assertAlmostEqual(float(self._eval("7 / 2")), 3.5)
+
+    def test_power(self):
+        self.assertEqual(self._eval("2 ** 10"), "1024")
+
+    def test_complex_expression(self):
+        self.assertEqual(self._eval("(10 + 5) * 2"), "30")
+
+    def test_sqrt_function(self):
+        self.assertEqual(self._eval("sqrt(144)"), "12")
+
+    def test_division_by_zero(self):
+        result = self._eval("1 / 0")
+        self.assertIn("Error", result)
+
+    def test_invalid_expression(self):
+        result = self._eval("import os")
+        self.assertIn("error", result.lower())
+
+    def test_disallowed_builtin(self):
+        result = self._eval("eval('1+1')")
+        self.assertIn("Error", result)
+
+    def test_plugin_register(self):
+        from plugins.calculator_plugin import register
+        plugin = register()
+        self.assertEqual(plugin.name, "Calculator")
+        self.assertEqual(plugin.version, "1.0.0")
+
+    def test_plugin_invoke(self):
+        from plugins.calculator_plugin import register
+        plugin = register()
+        result = asyncio.run(plugin.handler("100 + 23", {}))
+        self.assertEqual(result, "123")
+
+
+# ── TextStats Plugin ──────────────────────────────────────────────────────────
+
+class TestTextStatsPlugin(unittest.TestCase):
+    def test_basic_analysis(self):
+        from plugins.text_stats_plugin import _analyse
+        result = _analyse("the quick brown fox")
+        self.assertIn("Word count", result)
+        self.assertIn("4", result)
+
+    def test_empty_text(self):
+        from plugins.text_stats_plugin import _analyse
+        result = _analyse("")
+        self.assertIn("No words", result)
+
+    def test_top_n(self):
+        from plugins.text_stats_plugin import _analyse
+        result = _analyse("a a a b b c", top_n=2)
+        self.assertIn("'a'", result)
+
+    def test_plugin_register(self):
+        from plugins.text_stats_plugin import register
+        plugin = register()
+        self.assertEqual(plugin.name, "TextStats")
+
+    def test_plugin_invoke(self):
+        from plugins.text_stats_plugin import register
+        plugin = register()
+        result = asyncio.run(plugin.handler("hello world hello", {}))
+        self.assertIn("Word count", result)
+
+
+# ── Hallucination Reducer Cache ───────────────────────────────────────────────
+
+class TestHallucinationCache(unittest.TestCase):
+    def test_cache_hit(self):
+        from hallucination.reducer import _VerificationCache
+        cache = _VerificationCache(maxsize=10, ttl=3600)
+        result = {"supported": "yes", "confidence": 0.9, "explanation": "OK"}
+        cache.set("claim A", "evidence A", result)
+        cached = cache.get("claim A", "evidence A")
+        self.assertEqual(cached, result)
+
+    def test_cache_miss_different_claim(self):
+        from hallucination.reducer import _VerificationCache
+        cache = _VerificationCache(maxsize=10, ttl=3600)
+        cache.set("claim A", "evidence A", {"supported": "yes"})
+        self.assertIsNone(cache.get("claim B", "evidence A"))
+
+    def test_cache_ttl_expiry(self):
+        from hallucination.reducer import _VerificationCache
+        import time
+        cache = _VerificationCache(maxsize=10, ttl=0)  # Expires immediately
+        cache.set("claim", "evidence", {"supported": "yes"})
+        time.sleep(0.01)
+        self.assertIsNone(cache.get("claim", "evidence"))
+
+    def test_cache_maxsize_eviction(self):
+        from hallucination.reducer import _VerificationCache
+        cache = _VerificationCache(maxsize=3, ttl=3600)
+        for i in range(5):
+            cache.set(f"claim {i}", "ev", {"n": i})
+        # Should have evicted oldest and stored at most 3
+        self.assertLessEqual(len(cache._cache), 3)
+
+
+# ── Request-ID Middleware ─────────────────────────────────────────────────────
+
+class TestRequestIdMiddleware(unittest.TestCase):
+    def setUp(self):
+        from main import create_app
+        from fastapi.testclient import TestClient
+        self.client = TestClient(create_app())
+
+    def test_response_has_request_id_header(self):
+        response = self.client.get("/api/status")
+        self.assertIn("x-request-id", response.headers)
+        req_id = response.headers["x-request-id"]
+        self.assertTrue(len(req_id) > 0)
+
+    def test_client_request_id_is_echoed(self):
+        custom_id = "test-trace-abc-123"
+        response = self.client.get("/api/status", headers={"X-Request-ID": custom_id})
+        self.assertEqual(response.headers.get("x-request-id"), custom_id)
+
+
+# ── MegaSearch ranking ────────────────────────────────────────────────────────
+
+class TestMegaSearchRanking(unittest.TestCase):
+    def test_rank_puts_title_match_first(self):
+        from search.mega_search import MegaSearch
+        results = [
+            {"url": "https://a.com", "title": "Other stuff", "snippet": "nothing relevant", "source": "duckduckgo"},
+            {"url": "https://b.com", "title": "Python tutorial programming guide", "snippet": "Learn Python", "source": "wikipedia"},
+        ]
+        ranked = MegaSearch._rank(results, "python tutorial")
+        self.assertEqual(ranked[0]["url"], "https://b.com")
+
+    def test_rank_prefers_trusted_source(self):
+        from search.mega_search import MegaSearch
+        results = [
+            {"url": "https://r.com", "title": "python", "snippet": "", "source": "reddit"},
+            {"url": "https://w.com", "title": "python", "snippet": "", "source": "wikipedia"},
+        ]
+        ranked = MegaSearch._rank(results, "python")
+        self.assertEqual(ranked[0]["url"], "https://w.com")
+
+    def test_rank_empty_returns_empty(self):
+        from search.mega_search import MegaSearch
+        self.assertEqual(MegaSearch._rank([], "query"), [])
 
 
 if __name__ == "__main__":

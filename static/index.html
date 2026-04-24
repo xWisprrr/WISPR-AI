@@ -4,6 +4,11 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>WISPR AI OS</title>
+  <!-- Markdown rendering -->
+  <script src="https://cdn.jsdelivr.net/npm/marked@9/marked.min.js"></script>
+  <!-- Syntax highlighting -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/atom-one-dark.min.css" />
+  <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/lib/highlight.min.js"></script>
   <style>
     /* ── Reset & Variables ─────────────────────────────────────────── */
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -1112,6 +1117,45 @@
     .toast-error   { background: rgba(248,113,113,0.15); color: var(--error); border-color: rgba(248,113,113,0.3); }
     .toast-info    { background: rgba(124,106,245,0.15); color: var(--accent); border-color: rgba(124,106,245,0.3); }
 
+    /* ── Chat message copy button ──────────────────────────────────── */
+    .msg-copy-btn {
+      position: absolute;
+      top: 8px;
+      right: 10px;
+      opacity: 0;
+      background: rgba(255,255,255,0.07);
+      border: 1px solid var(--border);
+      color: var(--text-muted);
+      border-radius: 6px;
+      padding: 3px 8px;
+      font-size: 10px;
+      cursor: pointer;
+      transition: opacity 0.15s, color 0.15s;
+    }
+    .msg-bubble:hover .msg-copy-btn { opacity: 1; }
+    .msg-copy-btn:hover { color: var(--accent); }
+
+    /* ── Keyboard shortcut hint ─────────────────────────────────────── */
+    .kbd-hint {
+      display: inline-block;
+      background: rgba(255,255,255,0.07);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 1px 5px;
+      font-size: 10px;
+      color: var(--text-muted);
+      font-family: monospace;
+      letter-spacing: 0.03em;
+    }
+
+    /* ── highlight.js overrides for dark theme ─────────────────────── */
+    .msg-bubble pre,
+    .msg-bubble pre code { border-radius: var(--radius-sm) !important; }
+    .msg-bubble .hljs { background: #0d1117 !important; }
+
+    /* Position msg-bubble relative for copy button */
+    .msg-bubble { position: relative; }
+
     /* ── Scrollbar styles ──────────────────────────────────────────── */
     ::-webkit-scrollbar { width: 4px; height: 4px; }
     ::-webkit-scrollbar-track { background: transparent; }
@@ -1763,11 +1807,32 @@ function appendMsg(role, html) {
         <span class="msg-name">${isAI ? 'WISPR AI' : 'You'}</span>
         <span class="msg-time">${time}</span>
       </div>
-      <div class="msg-bubble">${html}</div>
+      <div class="msg-bubble">
+        ${html}
+        ${isAI ? '<button class="msg-copy-btn" title="Copy response" onclick="copyMsgText(this)">Copy</button>' : ''}
+      </div>
     </div>`;
   container.appendChild(div);
+
+  // Apply syntax highlighting to any code blocks in this message
+  if (typeof hljs !== 'undefined') {
+    div.querySelectorAll('pre code').forEach(block => hljs.highlightElement(block));
+  }
+
   container.scrollTop = container.scrollHeight;
   return div;
+}
+
+function copyMsgText(btn) {
+  const bubble = btn.closest('.msg-bubble');
+  // Clone the bubble, remove the copy button from the clone, then read text
+  const clone = bubble.cloneNode(true);
+  clone.querySelectorAll('.msg-copy-btn').forEach(el => el.remove());
+  const text = clone.textContent.trim();
+  navigator.clipboard.writeText(text).then(() => {
+    btn.textContent = 'Copied!';
+    setTimeout(() => { btn.textContent = 'Copy'; }, 1500);
+  });
 }
 
 function showTyping() {
@@ -1798,15 +1863,33 @@ function escapeHtml(str) {
   return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 
+/* Configure marked to use highlight.js for code blocks */
+(function() {
+  if (typeof marked === 'undefined') return;
+  marked.setOptions({
+    gfm: true,
+    breaks: true,
+    highlight: function(code, lang) {
+      if (typeof hljs !== 'undefined') {
+        const validLang = hljs.getLanguage(lang) ? lang : 'plaintext';
+        return hljs.highlight(code, { language: validLang }).value;
+      }
+      return escapeHtml(code);
+    },
+  });
+})();
+
 function formatResponse(text) {
-  // Code blocks
+  if (typeof marked !== 'undefined') {
+    try {
+      return marked.parse(text);
+    } catch(_) { /* fall through */ }
+  }
+  // Fallback: basic markdown
   text = text.replace(/```(\w*)\n?([\s\S]*?)```/g, (_, lang, code) =>
-    `<pre>${escapeHtml(code.trim())}</pre>`);
-  // Inline code
+    `<pre><code class="${lang}">${escapeHtml(code.trim())}</code></pre>`);
   text = text.replace(/`([^`]+)`/g, '<code>$1</code>');
-  // Bold
   text = text.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-  // Line breaks
   text = text.replace(/\n/g, '<br>');
   return text;
 }
@@ -2147,6 +2230,42 @@ async function storeMemory() {
     toast('Failed: ' + e.message, 'error');
   }
 }
+
+/* ── Keyboard shortcuts ─────────────────────────────────────────────── */
+(function() {
+  const panelKeys = {
+    '1': 'dashboard',
+    '2': 'chat',
+    '3': 'code',
+    '4': 'search',
+    '5': 'reason',
+    '6': 'hallucination',
+    '7': 'memory',
+  };
+
+  document.addEventListener('keydown', function(e) {
+    // Ignore when typing in an input/textarea
+    const tag = document.activeElement.tagName;
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+
+    // Alt+1…7  — switch panels
+    if (e.altKey && panelKeys[e.key]) {
+      e.preventDefault();
+      const panelId = panelKeys[e.key];
+      const btn = document.querySelector(`.nav-item[data-panel="${panelId}"]`);
+      if (btn) showPanel(panelId, btn);
+      return;
+    }
+
+    // / — focus chat input and jump to chat
+    if (e.key === '/') {
+      e.preventDefault();
+      const btn = document.querySelector('.nav-item[data-panel="chat"]');
+      if (btn) showPanel('chat', btn);
+      setTimeout(() => document.getElementById('chat-input')?.focus(), 50);
+    }
+  });
+})();
 
 /* ── Init ──────────────────────────────────────────────────────────── */
 loadStatus();
