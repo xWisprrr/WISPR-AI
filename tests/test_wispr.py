@@ -216,14 +216,14 @@ class TestComplexityClassification(unittest.TestCase):
 
     def test_classify_simple(self):
         orch = self._make_orchestrator("SIMPLE")
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             orch._classify_complexity("What is 2 + 2?")
         )
         self.assertEqual(result, "simple")
 
     def test_classify_complex(self):
         orch = self._make_orchestrator("COMPLEX")
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             orch._classify_complexity("Build a full-stack web app with authentication.")
         )
         self.assertEqual(result, "complex")
@@ -239,7 +239,7 @@ class TestComplexityClassification(unittest.TestCase):
         mock_llm.complete = AsyncMock(side_effect=RuntimeError("LLM down"))
         orch.llm = mock_llm
 
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             orch._classify_complexity("Hello!")
         )
         self.assertEqual(result, "complex")
@@ -269,7 +269,7 @@ class TestComplexityClassification(unittest.TestCase):
         )
         orch._agents = {"CoreAgent": mock_core}
 
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             orch.run("What is the capital of France?")
         )
         self.assertEqual(result["plan"], [])
@@ -303,7 +303,7 @@ class TestComplexityClassification(unittest.TestCase):
         mock_core.run = capture_run
         orch._agents = {"CoreAgent": mock_core}
 
-        asyncio.get_event_loop().run_until_complete(
+        asyncio.run(
             orch.run("What is 6 times 7?")
         )
         self.assertTrue(len(captured_context) > 0)
@@ -326,7 +326,7 @@ class TestCoreAgentConciseMode(unittest.TestCase):
 
     def test_concise_mode_uses_concise_prompt(self):
         agent = self._make_core_agent("Yes.")
-        asyncio.get_event_loop().run_until_complete(
+        asyncio.run(
             agent.run("Is the sky blue?", context={"response_style": "concise"})
         )
         # Verify the concise system prompt was used (check for its key instruction)
@@ -337,7 +337,7 @@ class TestCoreAgentConciseMode(unittest.TestCase):
 
     def test_normal_mode_uses_default_prompt(self):
         agent = self._make_core_agent("The sky is blue because of Rayleigh scattering.")
-        asyncio.get_event_loop().run_until_complete(
+        asyncio.run(
             agent.run("Why is the sky blue?")
         )
         call_args = agent.llm.complete.call_args
@@ -665,26 +665,50 @@ class TestCodeBlockExtraction(unittest.TestCase):
 # ── LLM Router — new features ─────────────────────────────────────────────────
 
 class TestLLMRouterUsage(unittest.TestCase):
+    """Tests for LLM router features.
+
+    These tests use a subprocess to avoid sys.modules contamination from other
+    test files (test_code_engine.py / test_xencode.py) that stub litellm.
+    """
+
+    def _run_in_subprocess(self, code: str) -> str:
+        """Run *code* in a clean Python subprocess and return stdout."""
+        import subprocess
+        proj_root = str(Path(__file__).parent.parent)
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            cwd=proj_root,
+            env={**os.environ, "PYTHONPATH": proj_root},
+            timeout=10,
+        )
+        return result.stdout.strip()
+
     def test_task_type_react_exists(self):
-        from llm.router import TaskType
-        self.assertIn("react", [t.value for t in TaskType])
+        out = self._run_in_subprocess(
+            "from llm.router import TaskType; "
+            "print('react' in [t.value for t in TaskType])"
+        )
+        self.assertEqual(out, "True")
 
     def test_llm_usage_zero_on_new_router(self):
-        from llm.router import LLMRouter
-        router = LLMRouter()
-        usage = router.get_total_usage()
-        self.assertIn("prompt_tokens", usage)
-        self.assertIn("completion_tokens", usage)
-        self.assertIn("total_tokens", usage)
-        self.assertEqual(usage["total_tokens"], 0)
+        out = self._run_in_subprocess(
+            "from llm.router import LLMRouter; "
+            "r = LLMRouter(); "
+            "u = r.get_total_usage(); "
+            "print(u['prompt_tokens'], u['completion_tokens'], u['total_tokens'])"
+        )
+        self.assertEqual(out, "0 0 0")
 
     def test_llm_usage_dataclass(self):
-        from llm.router import LLMUsage
-        u = LLMUsage(prompt_tokens=10, completion_tokens=20, total_tokens=30)
-        d = u.to_dict()
-        self.assertEqual(d["prompt_tokens"], 10)
-        self.assertEqual(d["completion_tokens"], 20)
-        self.assertEqual(d["total_tokens"], 30)
+        out = self._run_in_subprocess(
+            "from llm.router import LLMUsage; "
+            "u = LLMUsage(prompt_tokens=10, completion_tokens=20, total_tokens=30); "
+            "d = u.to_dict(); "
+            "print(d['prompt_tokens'], d['completion_tokens'], d['total_tokens'])"
+        )
+        self.assertEqual(out, "10 20 30")
 
 
 # ── Session Memory ────────────────────────────────────────────────────────────
@@ -796,7 +820,7 @@ class TestReActAgent(unittest.TestCase):
 
     def test_run_with_immediate_final_answer(self):
         agent = self._make_agent("Thought: Easy.\nFinal Answer: The answer is 4.")
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             agent.run("What is 2+2?")
         )
         self.assertTrue(result.success)
@@ -828,7 +852,7 @@ class TestReActAgent(unittest.TestCase):
         agent.llm.complete = mock_complete
 
         with patch.object(agent, "_tool_python", AsyncMock(return_value="4")) as mock_py:
-            result = asyncio.get_event_loop().run_until_complete(
+            result = asyncio.run(
                 agent.run("What is 2+2?")
             )
         self.assertTrue(result.success)
@@ -897,7 +921,7 @@ class TestNewAPIEndpoints(unittest.TestCase):
         self.assertEqual(data["session_id"], "test-session-xyz")
 
     def test_system_status_includes_react(self):
-        response = self.client.get("/")
+        response = self.client.get("/api/status")
         self.assertEqual(response.status_code, 200)
         data = response.json()
         self.assertIn("ReActAgent", data["agents"])

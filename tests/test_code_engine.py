@@ -25,17 +25,22 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # ---------------------------------------------------------------------------
 # Stub out heavy optional dependencies so tests run without a full install.
+# Only stub modules that are NOT already loaded (avoids contaminating
+# sys.modules for other test files that import the real modules).
 # ---------------------------------------------------------------------------
 _llm_stub = types.ModuleType("litellm")
 sys.modules.setdefault("litellm", _llm_stub)
 
-_llm_router_stub = types.ModuleType("llm.router")
-_llm_router_stub.LLMRouter = MagicMock  # type: ignore[attr-defined]
-_llm_router_stub.TaskType = MagicMock()  # type: ignore[attr-defined]
-_llm_router_stub.get_router = MagicMock(return_value=MagicMock())  # type: ignore[attr-defined]
-sys.modules.setdefault("llm", types.ModuleType("llm"))
-sys.modules.setdefault("llm.router", _llm_router_stub)
-
+# Only inject the llm.router stub when the real module isn't already loaded.
+# This prevents this file from replacing a real loaded module when tests are
+# run together with test_wispr.py (which imports the actual llm.router).
+if "llm.router" not in sys.modules:
+    _llm_router_stub = types.ModuleType("llm.router")
+    _llm_router_stub.LLMRouter = MagicMock  # type: ignore[attr-defined]
+    _llm_router_stub.TaskType = MagicMock()  # type: ignore[attr-defined]
+    _llm_router_stub.get_router = MagicMock(return_value=MagicMock())  # type: ignore[attr-defined]
+    sys.modules.setdefault("llm", types.ModuleType("llm"))
+    sys.modules["llm.router"] = _llm_router_stub
 
 
 # ══════════════════════════════════════════════════════════════════════════════
